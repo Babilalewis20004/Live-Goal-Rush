@@ -34,9 +34,14 @@ services:
     build:
       context: ./apps/web
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # Every fetch in this app runs in a Server Component (inside this
+        # container), never in the browser, so NEXT_PUBLIC_API_URL must
+        # resolve on the Docker network -- "localhost" here would mean the
+        # web container itself, not the api container. Override with
+        # NEXT_PUBLIC_API_URL_DOCKER if you need something else.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
     depends_on:
       - api
     ports:
