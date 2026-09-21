@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,8 +7,18 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.services.seed import seed_database
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        await seed_database()
+    except Exception:
+        logger.exception("Startup seeding failed; continuing without a pre-warmed database")
+    yield
 
 
 def create_app() -> FastAPI:
@@ -15,6 +26,7 @@ def create_app() -> FastAPI:
         title="Football Livescore API",
         description="Provider-agnostic football livescore API (Phase 1 MVP).",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     app.add_middleware(

@@ -27,3 +27,6 @@ class MatchEvent(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     match: Mapped["Match"] = relationship(back_populates="events")
+    team: Mapped["Team | None"] = relationship(foreign_keys=[team_id])
+    player: Mapped["Player | None"] = relationship(foreign_keys=[player_id])
+    assist_player: Mapped["Player | None"] = relationship(foreign_keys=[assist_player_id])

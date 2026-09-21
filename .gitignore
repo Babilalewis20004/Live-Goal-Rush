@@ -32,3 +32,6 @@ venv/
 
 # Docker
 *.log
+
+# Claude Code local state
+.claude/
