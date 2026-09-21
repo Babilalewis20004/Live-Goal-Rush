@@ -24,3 +24,23 @@ async def upsert_by_provider_id(
             setattr(obj, key, value)
     await db.flush()
     return obj
+
+
+async def upsert_by_unique_fields(
+    db: AsyncSession, model: type[ModelT], filters: dict, values: dict
+) -> ModelT:
+    """Get-or-create a row by an arbitrary set of unique fields (e.g.
+    `(match_id, provider_id)` for match events, `(competition_id, team_id)`
+    for standings), updating fields in place if it already exists. Used
+    where a single `provider_id` column isn't the natural identity."""
+    conditions = [getattr(model, key) == value for key, value in filters.items()]
+    result = await db.execute(select(model).where(*conditions))
+    obj = result.scalar_one_or_none()
+    if obj is None:
+        obj = model(**filters, **values)
+        db.add(obj)
+    else:
+        for key, value in values.items():
+            setattr(obj, key, value)
+    await db.flush()
+    return obj

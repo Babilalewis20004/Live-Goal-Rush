@@ -1,10 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from app.core.config import settings
+from app.schemas.common import DataStatus
 from app.schemas.competition import CompetitionOut
 from app.schemas.player import PlayerOut
 from app.schemas.team import TeamOut
+
+_LIVE_STATUSES = ("live", "halftime")
 
 
 class MatchSummary(BaseModel):
@@ -22,6 +26,26 @@ class MatchSummary(BaseModel):
     half_time_away_score: int | None
     minute: int | None
     venue: str | None
+    last_synced_at: datetime | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def data_status(self) -> DataStatus:
+        """Stale-data detection (Phase 2 §21). Computed at serialization
+        time (not stored), so it reflects freshness as of *this response*
+        even when `self` came from a Redis cache entry that's been sitting
+        for a few seconds -- age is measured against "now", not against
+        when the cache entry was written."""
+        if self.last_synced_at is None:
+            return DataStatus.UNAVAILABLE
+        is_live = self.status in _LIVE_STATUSES
+        threshold = (
+            settings.live_poll_interval_seconds * 3
+            if is_live
+            else settings.redis_default_ttl_seconds * 2
+        )
+        age_seconds = (datetime.now(timezone.utc) - self.last_synced_at).total_seconds()
+        return DataStatus.FRESH if age_seconds <= threshold else DataStatus.STALE
 
 
 class MatchEventOut(BaseModel):

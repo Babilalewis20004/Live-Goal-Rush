@@ -15,20 +15,82 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build:
       context: ./apps/api
-    environment:
+    environment: &api_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-football}:${POSTGRES_PASSWORD:-football}@postgres:5432/${POSTGRES_DB:-football_livescore}
+      REDIS_URL: redis://redis:6379/0
       FOOTBALL_DATA_PROVIDER: ${FOOTBALL_DATA_PROVIDER:-mock}
       FOOTBALL_API_BASE_URL: ${FOOTBALL_API_BASE_URL:-}
       FOOTBALL_API_KEY: ${FOOTBALL_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      LIVE_POLL_INTERVAL_SECONDS: ${LIVE_POLL_INTERVAL_SECONDS:-15}
+      UPCOMING_POLL_INTERVAL_SECONDS: ${UPCOMING_POLL_INTERVAL_SECONDS:-60}
+      POST_MATCH_SYNC_INTERVAL_SECONDS: ${POST_MATCH_SYNC_INTERVAL_SECONDS:-60}
+      REDIS_LIVE_MATCH_TTL_SECONDS: ${REDIS_LIVE_MATCH_TTL_SECONDS:-30}
+      REDIS_DEFAULT_TTL_SECONDS: ${REDIS_DEFAULT_TTL_SECONDS:-300}
+      WEBSOCKET_HEARTBEAT_SECONDS: ${WEBSOCKET_HEARTBEAT_SECONDS:-30}
+      WEBSOCKET_MAX_CONNECTIONS: ${WEBSOCKET_MAX_CONNECTIONS:-1000}
+      SYNC_MAX_RETRIES: ${SYNC_MAX_RETRIES:-3}
+      SYNC_BACKOFF_SECONDS: ${SYNC_BACKOFF_SECONDS:-5}
+      MOCK_LIVE_SECONDS_PER_MINUTE: ${MOCK_LIVE_SECONDS_PER_MINUTE:-2.0}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      # Dependency-free (no curl in the slim image): also doubles as proof
+      # that `alembic upgrade head` (run by this image's CMD before
+      # uvicorn starts) has completed, which is what worker/scheduler
+      # below actually wait on -- they must not query tables that don't
+      # exist yet.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    build:
+      context: ./apps/api
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    environment: *api_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: ./apps/api
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    environment: *api_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
   web:
     build:
@@ -42,6 +104,10 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
+      # Unlike the server-side fetches above, the browser opens the
+      # WebSocket directly, from the host machine -- so this must resolve
+      # on the host network (localhost), not the Docker network.
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
     depends_on:
       - api
     ports:
@@ -49,3 +115,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:

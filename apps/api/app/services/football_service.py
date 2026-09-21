@@ -1,25 +1,35 @@
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
 
-from sqlalchemy import delete, select
+import hashlib
+import logging
+from datetime import datetime, time, timedelta, timezone
+
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
+from app.core.redis_keys import RedisKeys
 from app.models.competition import Competition
 from app.models.enums import MatchEventType, MatchStatus
 from app.models.match import Match
 from app.models.match_event import MatchEvent
 from app.models.player import Player
+from app.models.standing import Standing
 from app.models.team import Team
 from app.schemas.competition import CompetitionOut
-from app.schemas.match import MatchDetail, MatchSummary
+from app.schemas.match import MatchDetail, MatchEventOut, MatchSummary
 from app.schemas.player import PlayerOut
 from app.schemas.search import SearchResults
 from app.schemas.standing import StandingEntry
 from app.schemas.team import TeamOut
+from app.services.cache import CacheAside
 from app.services.pagination import paginate
 from app.services.providers.base import FootballDataProvider
-from app.services.providers.schemas import ProviderMatch
-from app.services.upsert import upsert_by_provider_id
+from app.services.providers.schemas import ProviderMatch, ProviderMatchEvent
+from app.services.upsert import upsert_by_provider_id, upsert_by_unique_fields
+
+logger = logging.getLogger(__name__)
 
 _MATCH_LOAD_OPTIONS = (
     selectinload(Match.competition),
@@ -39,16 +49,54 @@ class NotFoundError(Exception):
     into a 404 response."""
 
 
-class FootballService:
-    """Router-facing business logic. Syncs provider data into Postgres on
-    read (Phase 1 has no background ingestion job yet) and always returns
-    data shaped from the database, never raw provider payloads."""
+def _synthetic_event_key(match_provider_id: str, event: ProviderMatchEvent, index: int) -> str:
+    """Deterministic identity for a match event when the provider doesn't
+    supply its own id (Phase 2 §25): a hash of the fields that make an
+    event distinct, plus its position in the provider's event list as a
+    tiebreaker (e.g. two same-minute, same-team cards with no player
+    attached). The bundled mock provider always supplies its own id; this
+    exists for providers that don't."""
+    basis = "|".join(
+        [
+            match_provider_id,
+            event.event_type,
+            str(event.minute),
+            event.team.provider_id if event.team else "",
+            event.player.provider_id if event.player else "",
+            str(index),
+        ]
+    )
+    return hashlib.sha1(basis.encode()).hexdigest()[:24]
 
-    def __init__(self, db: AsyncSession, provider: FootballDataProvider) -> None:
+
+class FootballService:
+    """Router-facing business logic.
+
+    Phase 2 splits what Phase 1's methods used to do in one step:
+
+    - **Sync** methods (provider -> database) are now only called by the
+      background worker (`app/worker/tasks.py`) and the startup seed
+      (`app/services/seed.py`) -- never from a request handler (spec §6).
+    - **Read** methods (database/cache -> API schema) are what routers
+      call via `app/api/deps.py`; they no longer call the provider
+      (spec §5), with two narrow, deliberate exceptions: `search` (an
+      arbitrary query has no fixed key a background job could pre-warm)
+      and `list_competitions` (a small, near-static reference list that's
+      cheap to cache-aside directly rather than needing its own sync job
+      and DB table dependency before it can return anything).
+    """
+
+    def __init__(
+        self,
+        db: AsyncSession,
+        provider: FootballDataProvider,
+        cache: CacheAside | None = None,
+    ) -> None:
         self.db = db
         self.provider = provider
+        self.cache = cache
 
-    # -- syncing (provider -> database) ------------------------------------
+    # -- syncing (provider -> database) --------------------------------------
 
     async def _sync_competition(self, provider_competition) -> Competition:
         return await upsert_by_provider_id(
@@ -89,7 +137,10 @@ class FootballService:
             },
         )
 
-    async def _sync_match(self, provider_match: ProviderMatch, *, with_events: bool = False) -> Match:
+    async def sync_match(self, provider_match: ProviderMatch, *, with_events: bool = False) -> Match:
+        """Upsert one match (and its competition/teams/events) from a
+        provider payload. Public because `worker/tasks.py` calls this
+        directly for single-match live syncs, not just full-list ones."""
         competition = await self._sync_competition(provider_match.competition)
         home = await self._sync_team(provider_match.home_team)
         away = await self._sync_team(provider_match.away_team)
@@ -110,115 +161,199 @@ class FootballService:
                 "half_time_away_score": provider_match.half_time_away_score,
                 "venue": provider_match.venue,
                 "minute": provider_match.minute,
+                "last_synced_at": datetime.now(timezone.utc),
             },
         )
 
         if with_events:
-            await self.db.execute(delete(MatchEvent).where(MatchEvent.match_id == match.id))
-            for provider_event in provider_match.events:
-                team = await self._sync_team(provider_event.team) if provider_event.team else None
-                player = (
-                    await self._sync_player(provider_event.player, team.id if team else None)
-                    if provider_event.player
-                    else None
-                )
-                assist = (
-                    await self._sync_player(provider_event.assist_player, team.id if team else None)
-                    if provider_event.assist_player
-                    else None
-                )
-                self.db.add(
-                    MatchEvent(
-                        provider_id=provider_event.provider_id,
-                        match_id=match.id,
-                        event_type=MatchEventType(provider_event.event_type),
-                        minute=provider_event.minute,
-                        extra_minute=provider_event.extra_minute,
-                        team_id=team.id if team else None,
-                        player_id=player.id if player else None,
-                        assist_player_id=assist.id if assist else None,
-                        description=provider_event.description,
-                    )
-                )
-            await self.db.flush()
+            await self._sync_match_events(match, provider_match)
 
         return match
 
-    # -- reads (database -> API schemas) -----------------------------------
+    async def _sync_match_events(self, match: Match, provider_match: ProviderMatch) -> None:
+        """Upserts events by their (match_id, provider_id) identity instead
+        of Phase 1's delete-all-then-reinsert, so an event's database id
+        stays stable across polls (spec §24/§25) -- change detection relies
+        on that stability to tell "still the same event" apart from "new
+        event". Events no longer present in the provider's payload (rare --
+        a provider correction) are removed."""
+        seen_keys: set[str] = set()
+        for index, provider_event in enumerate(provider_match.events):
+            team = await self._sync_team(provider_event.team) if provider_event.team else None
+            player = (
+                await self._sync_player(provider_event.player, team.id if team else None)
+                if provider_event.player
+                else None
+            )
+            assist = (
+                await self._sync_player(provider_event.assist_player, team.id if team else None)
+                if provider_event.assist_player
+                else None
+            )
+            event_key = provider_event.provider_id or _synthetic_event_key(
+                provider_match.provider_id, provider_event, index
+            )
+            seen_keys.add(event_key)
+            await upsert_by_unique_fields(
+                self.db,
+                MatchEvent,
+                {"match_id": match.id, "provider_id": event_key},
+                {
+                    "event_type": MatchEventType(provider_event.event_type),
+                    "minute": provider_event.minute,
+                    "extra_minute": provider_event.extra_minute,
+                    "team_id": team.id if team else None,
+                    "player_id": player.id if player else None,
+                    "assist_player_id": assist.id if assist else None,
+                    "description": provider_event.description,
+                },
+            )
+
+        stale_condition = (
+            MatchEvent.provider_id.notin_(seen_keys) if seen_keys else MatchEvent.provider_id.isnot(None)
+        )
+        await self.db.execute(
+            delete(MatchEvent).where(
+                MatchEvent.match_id == match.id,
+                or_(MatchEvent.provider_id.is_(None), stale_condition),
+            )
+        )
+        await self.db.flush()
+
+    async def sync_standings(self, competition: Competition) -> None:
+        """Persist a competition's current table. Standings are no longer
+        fetched live on every request (see `get_standings` below) -- the
+        worker calls this alongside fixture syncing."""
+        provider_rows = await self.provider.get_standings(competition.provider_id)
+        for row in provider_rows:
+            team = await self._sync_team(row.team)
+            await upsert_by_unique_fields(
+                self.db,
+                Standing,
+                {"competition_id": competition.id, "team_id": team.id},
+                {
+                    "position": row.position,
+                    "played": row.played,
+                    "won": row.won,
+                    "drawn": row.drawn,
+                    "lost": row.lost,
+                    "goals_for": row.goals_for,
+                    "goals_against": row.goals_against,
+                    "points": row.points,
+                },
+            )
+
+    async def sync_all_competitions_and_fixtures(self) -> None:
+        """Pull every competition, its current fixtures, and its standings
+        from the provider into the database. Used on app startup so
+        id-based lookups work immediately, without waiting for a background
+        sync cycle to populate the database first."""
+        for provider_competition in await self.provider.get_competitions():
+            competition = await self._sync_competition(provider_competition)
+            fixtures = await self.provider.get_competition_fixtures(provider_competition.provider_id)
+            for provider_match in fixtures:
+                await self.sync_match(provider_match, with_events=True)
+            await self.sync_standings(competition)
+        await self.db.commit()
+
+    # -- reads (database/cache -> API schemas) -------------------------------
 
     async def _load_match(self, match_id: int, *, with_events: bool) -> Match | None:
         options = _MATCH_DETAIL_LOAD_OPTIONS if with_events else _MATCH_LOAD_OPTIONS
         stmt = select(Match).where(Match.id == match_id).options(*options)
         return (await self.db.execute(stmt)).scalar_one_or_none()
 
-    async def _sync_and_load(self, provider_matches: list[ProviderMatch]) -> list[MatchSummary]:
-        matches = [await self._sync_match(pm) for pm in provider_matches]
-        await self.db.commit()
-        matches.sort(key=lambda m: m.kickoff_time)
-        loaded = [await self._load_match(m.id, with_events=False) for m in matches]
-        return [MatchSummary.model_validate(m) for m in loaded if m is not None]
+    async def _query_matches(self, *conditions) -> list[MatchSummary]:
+        stmt = (
+            select(Match)
+            .where(*conditions)
+            .options(*_MATCH_LOAD_OPTIONS)
+            .order_by(Match.kickoff_time)
+        )
+        matches = (await self.db.execute(stmt)).scalars().all()
+        return [MatchSummary.model_validate(m) for m in matches]
 
     async def get_live_matches(self) -> list[MatchSummary]:
-        provider_matches = await self.provider.get_live_matches()
-        return await self._sync_and_load(provider_matches)
+        async def _load() -> list[MatchSummary]:
+            return await self._query_matches(Match.status.in_([MatchStatus.LIVE, MatchStatus.HALFTIME]))
+
+        if self.cache is None:
+            return await _load()
+        return await self.cache.get_or_set_list(
+            RedisKeys.LIVE_MATCHES, MatchSummary, _load, ttl_seconds=settings.redis_live_match_ttl_seconds
+        )
 
     async def get_today_matches(self) -> list[MatchSummary]:
-        today = datetime.now(timezone.utc).date()
-        provider_matches = await self.provider.get_fixtures(today)
-        return await self._sync_and_load(provider_matches)
+        async def _load() -> list[MatchSummary]:
+            today = datetime.now(timezone.utc).date()
+            start = datetime.combine(today, time.min, tzinfo=timezone.utc)
+            end = start + timedelta(days=1)
+            return await self._query_matches(Match.kickoff_time >= start, Match.kickoff_time < end)
+
+        if self.cache is None:
+            return await _load()
+        return await self.cache.get_or_set_list(
+            RedisKeys.TODAY_MATCHES, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
+        )
 
     async def get_upcoming_matches(self, days: int = 7) -> list[MatchSummary]:
-        now = datetime.now(timezone.utc)
-        today = now.date()
-        provider_matches: list[ProviderMatch] = []
-        seen_ids: set[str] = set()
-        for offset in range(days + 1):
-            for pm in await self.provider.get_fixtures(today + timedelta(days=offset)):
-                if pm.status == "scheduled" and pm.kickoff_time > now and pm.provider_id not in seen_ids:
-                    provider_matches.append(pm)
-                    seen_ids.add(pm.provider_id)
-        return await self._sync_and_load(provider_matches)
+        async def _load() -> list[MatchSummary]:
+            now = datetime.now(timezone.utc)
+            end = now + timedelta(days=days)
+            return await self._query_matches(
+                Match.status == MatchStatus.SCHEDULED,
+                Match.kickoff_time > now,
+                Match.kickoff_time <= end,
+            )
+
+        if self.cache is None:
+            return await _load()
+        key = RedisKeys.upcoming_matches(datetime.now(timezone.utc).date())
+        return await self.cache.get_or_set_list(
+            key, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
+        )
 
     async def get_match(self, match_id: int) -> MatchDetail:
-        match = await self._load_match(match_id, with_events=False)
-        if match is None:
-            raise NotFoundError(f"Match {match_id} not found")
+        async def _load() -> MatchDetail:
+            match = await self._load_match(match_id, with_events=True)
+            if match is None:
+                raise NotFoundError(f"Match {match_id} not found")
+            return MatchDetail.model_validate(match)
 
-        provider_match = await self.provider.get_match(match.provider_id)
-        if provider_match is not None:
-            match = await self._sync_match(provider_match, with_events=True)
-            await self.db.commit()
+        if self.cache is None:
+            return await _load()
+        return await self.cache.get_or_set_model(
+            RedisKeys.match(match_id), MatchDetail, _load, ttl_seconds=settings.redis_live_match_ttl_seconds
+        )
 
-        match = await self._load_match(match.id, with_events=True)
-        if match is None:
-            raise NotFoundError(f"Match {match_id} not found")
-        return MatchDetail.model_validate(match)
-
-    async def get_match_events(self, match_id: int) -> list:
+    async def get_match_events(self, match_id: int) -> list[MatchEventOut]:
+        # Piggybacks on the match-detail cache entry above rather than
+        # maintaining a second `football:match:{id}:events` entry with its
+        # own TTL -- detail and events are always synced together, so a
+        # duplicate cache read would only ever return the same data.
         detail = await self.get_match(match_id)
         return detail.events
-
-    async def sync_all_competitions_and_fixtures(self) -> None:
-        """Pull every competition and its current fixtures from the provider
-        into the database. Used on app startup so id-based lookups work
-        immediately, without waiting for a prior list request to populate
-        the database first."""
-        for provider_competition in await self.provider.get_competitions():
-            await self._sync_competition(provider_competition)
-            fixtures = await self.provider.get_competition_fixtures(provider_competition.provider_id)
-            for provider_match in fixtures:
-                await self._sync_match(provider_match, with_events=True)
-        await self.db.commit()
 
     # -- competitions ---------------------------------------------------
 
     async def list_competitions(self, page: int, page_size: int) -> tuple[list[CompetitionOut], int]:
-        provider_competitions = await self.provider.get_competitions()
-        competitions = [await self._sync_competition(pc) for pc in provider_competitions]
-        await self.db.commit()
-        competitions.sort(key=lambda c: c.name)
-        items, total = paginate(competitions, page, page_size)
-        return [CompetitionOut.model_validate(c) for c in items], total
+        async def _load() -> list[CompetitionOut]:
+            provider_competitions = await self.provider.get_competitions()
+            competitions = [await self._sync_competition(pc) for pc in provider_competitions]
+            await self.db.commit()
+            competitions.sort(key=lambda c: c.name)
+            return [CompetitionOut.model_validate(c) for c in competitions]
+
+        if self.cache is None:
+            all_competitions = await _load()
+        else:
+            all_competitions = await self.cache.get_or_set_list(
+                "football:competitions",
+                CompetitionOut,
+                _load,
+                ttl_seconds=settings.redis_default_ttl_seconds,
+            )
+        return paginate(all_competitions, page, page_size)
 
     async def _get_competition_by_id(self, competition_id: int) -> Competition:
         result = await self.db.execute(select(Competition).where(Competition.id == competition_id))
@@ -235,32 +370,38 @@ class FootballService:
         self, competition_id: int, page: int, page_size: int
     ) -> tuple[list[MatchSummary], int]:
         competition = await self._get_competition_by_id(competition_id)
-        provider_matches = await self.provider.get_competition_fixtures(competition.provider_id)
-        summaries = await self._sync_and_load(provider_matches)
-        items, total = paginate(summaries, page, page_size)
-        return items, total
+
+        async def _load() -> list[MatchSummary]:
+            return await self._query_matches(Match.competition_id == competition.id)
+
+        if self.cache is None:
+            summaries = await _load()
+        else:
+            key = RedisKeys.competition_fixtures(competition_id, datetime.now(timezone.utc).date())
+            summaries = await self.cache.get_or_set_list(
+                key, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
+            )
+        return paginate(summaries, page, page_size)
 
     async def get_standings(self, competition_id: int) -> list[StandingEntry]:
         competition = await self._get_competition_by_id(competition_id)
-        provider_rows = await self.provider.get_standings(competition.provider_id)
-        entries = []
-        for row in provider_rows:
-            team = await self._sync_team(row.team)
-            entries.append(
-                StandingEntry(
-                    position=row.position,
-                    team=TeamOut.model_validate(team),
-                    played=row.played,
-                    won=row.won,
-                    drawn=row.drawn,
-                    lost=row.lost,
-                    goals_for=row.goals_for,
-                    goals_against=row.goals_against,
-                    points=row.points,
-                )
+
+        async def _load() -> list[StandingEntry]:
+            stmt = (
+                select(Standing)
+                .where(Standing.competition_id == competition.id)
+                .options(selectinload(Standing.team))
+                .order_by(Standing.position)
             )
-        await self.db.commit()
-        return entries
+            rows = (await self.db.execute(stmt)).scalars().all()
+            return [StandingEntry.model_validate(row) for row in rows]
+
+        if self.cache is None:
+            return await _load()
+        key = RedisKeys.competition_standings(competition_id)
+        return await self.cache.get_or_set_list(
+            key, StandingEntry, _load, ttl_seconds=settings.redis_default_ttl_seconds
+        )
 
     # -- teams ------------------------------------------------------------
 
@@ -279,18 +420,29 @@ class FootballService:
         self, team_id: int, page: int, page_size: int, *, upcoming_only: bool = False
     ) -> tuple[list[MatchSummary], int]:
         team = await self._get_team_by_id(team_id)
-        provider_matches = await self.provider.get_team_fixtures(team.provider_id)
-        if upcoming_only:
-            provider_matches = [m for m in provider_matches if m.status == "scheduled"]
+
+        async def _load() -> list[MatchSummary]:
+            return await self._query_matches(or_(Match.home_team_id == team.id, Match.away_team_id == team.id))
+
+        if self.cache is None:
+            all_matches = await _load()
         else:
-            provider_matches = [m for m in provider_matches if m.status == "finished"]
-        summaries = await self._sync_and_load(provider_matches)
-        items, total = paginate(summaries, page, page_size)
-        return items, total
+            key = RedisKeys.team_fixtures(team_id)
+            all_matches = await self.cache.get_or_set_list(
+                key, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
+            )
+
+        status_filter = "scheduled" if upcoming_only else "finished"
+        filtered = [m for m in all_matches if m.status == status_filter]
+        return paginate(filtered, page, page_size)
 
     # -- search -------------------------------------------------------------
 
     async def search(self, query: str) -> SearchResults:
+        # Deliberately not cached/background-synced: an arbitrary query
+        # string has no fixed cache key a sync job could pre-warm, and
+        # search is inherently interactive (spec §4's cache list doesn't
+        # include it).
         query = query.strip()
         if not query:
             return SearchResults()

@@ -39,6 +39,11 @@ class Match(Base, TimestampMixin):
     minute: Mapped[int | None] = mapped_column(nullable=True)
     """Current live minute. Not in the spec's minimum field list but needed to
     render an in-progress match without recomputing elapsed time client-side."""
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When this row was last written from a provider sync (worker task or
+    startup seed). Used to compute `data_status` (FRESH/STALE/UNAVAILABLE)
+    for stale-data detection (Phase 2 §21) -- distinct from `updated_at`,
+    which also changes for non-provider writes."""
 
     competition: Mapped["Competition"] = relationship(back_populates="matches")
     home_team: Mapped["Team"] = relationship(foreign_keys=[home_team_id])

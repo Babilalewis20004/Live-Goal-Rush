@@ -33,6 +33,8 @@ export interface PlayerOut {
   photo_url: string | null
 }
 
+export type DataStatus = "FRESH" | "STALE" | "UNAVAILABLE"
+
 export interface MatchSummary {
   id: number
   competition: CompetitionOut
@@ -46,6 +48,10 @@ export interface MatchSummary {
   half_time_away_score: number | null
   minute: number | null
   venue: string | null
+  /** When this row was last written by a provider sync (Phase 2). */
+  last_synced_at: string | null
+  /** Computed server-side from `last_synced_at` at response time (Phase 2 §21). */
+  data_status: DataStatus
 }
 
 export interface MatchEventOut {
@@ -86,4 +92,41 @@ export interface Page<T> {
   total: number
   page: number
   page_size: number
+}
+
+// -- Phase 2: WebSocket message contract (see docs/architecture/realtime.md) --
+
+export type RealtimeEventType =
+  | "MATCH_STARTED"
+  | "MATCH_UPDATED"
+  | "GOAL"
+  | "CARD"
+  | "SUBSTITUTION"
+  | "HALF_TIME"
+  | "SECOND_HALF_STARTED"
+  | "MATCH_FINISHED"
+  | "MATCH_POSTPONED"
+  | "MATCH_CANCELLED"
+
+export interface RealtimeMatchEvent {
+  id: number
+  event_type: string
+  minute: number
+  team_id: number | null
+  player: string | null
+  description: string | null
+}
+
+export interface RealtimeMatchPayload {
+  id: string
+  home_score: number
+  away_score: number
+  status: MatchStatus
+  minute: number | null
+  event?: RealtimeMatchEvent
+}
+
+export interface RealtimeMessage {
+  type: RealtimeEventType
+  match: RealtimeMatchPayload
 }

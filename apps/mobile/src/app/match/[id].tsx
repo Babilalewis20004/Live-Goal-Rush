@@ -6,6 +6,8 @@ import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
 import { LoadingState } from "@/components/loading-state"
 import { TeamBadge } from "@/components/team-badge"
+import { ConnectionBadge } from "@/components/connection-badge"
+import { useMatchDetail } from "@/hooks/use-match-detail"
 import { api, ApiError } from "@/lib/api"
 import { formatKickoff, formatKickoffDate } from "@/lib/format"
 import { theme } from "@/theme"
@@ -21,14 +23,14 @@ function statusLabel(status: string, minute: number | null): string {
 
 export default function MatchScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
-  const [match, setMatch] = useState<MatchDetail | null>(null)
+  const [initialMatch, setInitialMatch] = useState<MatchDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      setMatch(await api.getMatch(Number(id)))
+      setInitialMatch(await api.getMatch(Number(id)))
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Match not found." : "Unable to load this match.")
     } finally {
@@ -49,7 +51,7 @@ export default function MatchScreen() {
     )
   }
 
-  if (error || !match) {
+  if (error || !initialMatch) {
     return (
       <View style={styles.screen}>
         <ErrorState message={error ?? "Unable to load this match."} onRetry={load} />
@@ -57,10 +59,19 @@ export default function MatchScreen() {
     )
   }
 
+  return <LiveMatchScreen initialMatch={initialMatch} />
+}
+
+function LiveMatchScreen({ initialMatch }: { initialMatch: MatchDetail }) {
+  const { match, connectionStatus } = useMatchDetail(initialMatch)
   const isLive = match.status === "live" || match.status === "halftime"
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <View style={styles.headerRow}>
+        <ConnectionBadge status={connectionStatus} />
+      </View>
+
       <View style={styles.card}>
         <Text style={styles.competition}>{match.competition.name}</Text>
         <View style={styles.scoreRow}>
@@ -134,6 +145,10 @@ const styles = StyleSheet.create({
   content: {
     padding: 16,
     gap: 12,
+  },
+  headerRow: {
+    marginBottom: 4,
+    alignItems: "flex-end",
   },
   card: {
     borderRadius: 16,

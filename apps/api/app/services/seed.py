@@ -4,10 +4,11 @@ from app.services.providers import get_provider
 
 
 async def seed_database() -> None:
-    """Warm the database with the provider's current competitions, teams and
-    matches on startup. Phase 1 has no background ingestion job, so without
-    this, id-based lookups (GET /teams/{id}, /competitions/{id}, ...) would
-    404 until some earlier list request happened to sync that entity."""
+    """Warm the database with the provider's current competitions, teams,
+    matches and standings on startup, so id-based lookups (GET /teams/{id},
+    /competitions/{id}, ...) work immediately rather than 404ing until the
+    Celery beat schedule's first sync cycle completes (see
+    app/worker/schedule.py)."""
     async with AsyncSessionLocal() as db:
         service = FootballService(db=db, provider=get_provider())
         await service.sync_all_competitions_and_fixtures()

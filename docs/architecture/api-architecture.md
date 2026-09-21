@@ -2,7 +2,9 @@
 
 Base path: `/api/v1`. Interactive docs (Swagger UI) at `/docs`, raw OpenAPI
 schema at `/openapi.json`, once the API is running. Health check at
-`/health` (unversioned, outside `/api/v1`).
+`/health`, metrics at `/metrics`, WebSocket endpoints at `/ws/*` — all
+unversioned, outside `/api/v1` (see `deployment/docker.md` and
+`development/websockets.md` for those).
 
 ## Endpoints
 
@@ -61,6 +63,8 @@ clients don't need a second round-trip to render a match card.
   "half_time_away_score": null,
   "minute": 74,
   "venue": "Santiago Bernabéu",
+  "last_synced_at": "2026-09-21T21:28:14Z",  // Phase 2
+  "data_status": "FRESH",                     // Phase 2 -- FRESH | STALE | UNAVAILABLE
   "events": [
     { "id": 41, "event_type": "goal", "minute": 12, "extra_minute": null,
       "team": { "...": "TeamOut" }, "player": { "...": "PlayerOut" },
@@ -68,6 +72,18 @@ clients don't need a second round-trip to render a match card.
   ]
 }
 ```
+
+`last_synced_at`/`data_status` appear on every `MatchSummary`/`MatchDetail`
+(so list endpoints carry them too, not just detail) — computed at response
+time from `Match.last_synced_at`, not stored as `data_status` itself. See
+`architecture/realtime.md`'s "Stale-data detection" section.
+
+## Real-time (Phase 2)
+
+REST remains the way every client gets its *initial* state. For updates
+after that without polling, see `/ws/matches` and `/ws/matches/{match_id}`
+— full contract in `architecture/realtime.md` and
+`development/websockets.md`.
 
 ## Pagination
 

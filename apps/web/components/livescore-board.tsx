@@ -3,10 +3,12 @@
 import { useMemo, useState } from "react"
 import type { MatchSummary } from "@/types/api"
 import { groupByCompetition } from "@/lib/format"
+import { useLivescoreBoard } from "@/hooks/use-livescore-board"
 import { LeagueSection } from "./league-section"
 import { LivescoreHeader } from "./livescore-header"
 import { HighlightCarousel } from "./highlight-carousel"
 import { EmptyState } from "./ui/empty-state"
+import { ConnectionBadge } from "./ui/connection-badge"
 
 type Filter = "live" | "today" | "upcoming" | "finished"
 
@@ -27,30 +29,33 @@ export function LivescoreBoard({
   upcoming: MatchSummary[]
 }) {
   const [filter, setFilter] = useState<Filter>("live")
-
-  const finished = useMemo(() => today.filter((m) => m.status === "finished"), [today])
+  const board = useLivescoreBoard(live, today, upcoming)
 
   const active = useMemo(() => {
     switch (filter) {
       case "live":
-        return live
+        return board.live
       case "today":
-        return today
+        return board.today
       case "upcoming":
-        return upcoming
+        return board.upcoming
       case "finished":
-        return finished
+        return board.finished
     }
-  }, [filter, live, today, upcoming, finished])
+  }, [filter, board])
 
   const groups = useMemo(() => groupByCompetition(active), [active])
 
   return (
     <>
-      <LivescoreHeader liveCount={live.length} />
+      <LivescoreHeader liveCount={board.live.length} />
 
       <div className="mx-auto max-w-2xl px-4 pb-16 pt-4">
-        <HighlightCarousel matches={live} />
+        <div className="mb-3 flex justify-end">
+          <ConnectionBadge status={board.connectionStatus} />
+        </div>
+
+        <HighlightCarousel matches={board.live} />
 
         <div className="sticky top-[65px] z-10 -mx-1 mb-4 flex gap-1.5 overflow-x-auto px-1 py-1">
           {FILTERS.map((f) => {

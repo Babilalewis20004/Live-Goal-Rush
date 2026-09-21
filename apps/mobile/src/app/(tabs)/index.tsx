@@ -4,6 +4,8 @@ import { LeagueSection } from "@/components/league-section"
 import { LoadingState } from "@/components/loading-state"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
+import { ConnectionBadge } from "@/components/connection-badge"
+import { useLivescoreBoard } from "@/hooks/use-livescore-board"
 import { groupByCompetition } from "@/lib/format"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
@@ -20,9 +22,9 @@ const FILTERS: { key: Filter; label: string }[] = [
 
 export default function HomeScreen() {
   const [filter, setFilter] = useState<Filter>("live")
-  const [live, setLive] = useState<MatchSummary[]>([])
-  const [today, setToday] = useState<MatchSummary[]>([])
-  const [upcoming, setUpcoming] = useState<MatchSummary[]>([])
+  const [initialLive, setInitialLive] = useState<MatchSummary[]>([])
+  const [initialToday, setInitialToday] = useState<MatchSummary[]>([])
+  const [initialUpcoming, setInitialUpcoming] = useState<MatchSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -35,9 +37,9 @@ export default function HomeScreen() {
         api.getTodayMatches(),
         api.getUpcomingMatches(),
       ])
-      setLive(liveData)
-      setToday(todayData)
-      setUpcoming(upcomingData)
+      setInitialLive(liveData)
+      setInitialToday(todayData)
+      setInitialUpcoming(upcomingData)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Unable to load matches.")
     } finally {
@@ -53,45 +55,77 @@ export default function HomeScreen() {
     return () => clearTimeout(handle)
   }, [load])
 
-  const finished = useMemo(() => today.filter((m) => m.status === "finished"), [today])
+  // Only mounted once the initial REST load has completed -- keeps the
+  // WebSocket hook's seed data (and thus its match id set) from being
+  // rebuilt out from under it by a background pull-to-refresh.
+  return loading ? (
+    <View style={styles.screen}>
+      <LoadingState label="Loading matches…" />
+    </View>
+  ) : error ? (
+    <View style={styles.screen}>
+      <ErrorState message={error} onRetry={load} />
+    </View>
+  ) : (
+    <LiveHomeScreen
+      initialLive={initialLive}
+      initialToday={initialToday}
+      initialUpcoming={initialUpcoming}
+      filter={filter}
+      setFilter={setFilter}
+      refreshing={refreshing}
+      onRefresh={() => {
+        setRefreshing(true)
+        void load()
+      }}
+    />
+  )
+}
+
+function LiveHomeScreen({
+  initialLive,
+  initialToday,
+  initialUpcoming,
+  filter,
+  setFilter,
+  refreshing,
+  onRefresh,
+}: {
+  initialLive: MatchSummary[]
+  initialToday: MatchSummary[]
+  initialUpcoming: MatchSummary[]
+  filter: Filter
+  setFilter: (f: Filter) => void
+  refreshing: boolean
+  onRefresh: () => void
+}) {
+  const board = useLivescoreBoard(initialLive, initialToday, initialUpcoming)
 
   const active = useMemo(() => {
     switch (filter) {
       case "live":
-        return live
+        return board.live
       case "today":
-        return today
+        return board.today
       case "upcoming":
-        return upcoming
+        return board.upcoming
       case "finished":
-        return finished
+        return board.finished
     }
-  }, [filter, live, today, upcoming, finished])
+  }, [filter, board])
 
   const groups = useMemo(() => groupByCompetition(active), [active])
-
-  if (loading) {
-    return (
-      <View style={styles.screen}>
-        <LoadingState label="Loading matches…" />
-      </View>
-    )
-  }
-
-  if (error) {
-    return (
-      <View style={styles.screen}>
-        <ErrorState message={error} onRetry={load} />
-      </View>
-    )
-  }
 
   return (
     <ScrollView
       style={styles.screen}
       contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load() }} tintColor={theme.emerald} />}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.emerald} />}
     >
+      <View style={styles.headerRow}>
+        <ConnectionBadge status={board.connectionStatus} />
+      </View>
+
       <View style={styles.tabs}>
         {FILTERS.map((f) => {
           const isActive = filter === f.key
@@ -125,6 +159,9 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
+  },
+  headerRow: {
+    marginBottom: 8,
   },
   tabs: {
     flexDirection: "row",

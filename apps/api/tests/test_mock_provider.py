@@ -42,9 +42,19 @@ async def test_get_match_by_provider_id(provider):
     assert match is not None
     assert match.home_team.provider_id == "t-rma"
     assert match.away_team.provider_id == "t-mci"
-    assert match.events
 
     assert await provider.get_match("does-not-exist") is None
+
+
+async def test_finished_match_events_are_fully_revealed(provider):
+    # epl-3 is "finished_today" -- unlike a "live"/"halftime" fixture, its
+    # events aren't time-evolving (see mock_provider.py's module docstring),
+    # so asserting its full event list is deterministic regardless of when
+    # this test happens to run.
+    match = await provider.get_match("epl-3")
+    assert match is not None
+    assert match.status == "finished"
+    assert len(match.events) == 5
 
 
 async def test_get_competitions_returns_all_of_them(provider):

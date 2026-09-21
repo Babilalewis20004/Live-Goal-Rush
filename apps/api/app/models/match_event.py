@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Enum, ForeignKey, String
+from sqlalchemy import Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -10,6 +10,18 @@ from app.models.mixins import TimestampMixin
 
 class MatchEvent(Base, TimestampMixin):
     __tablename__ = "match_events"
+    # (match_id, provider_id) is this event's stable identity (Phase 2 §25):
+    # sync always assigns a provider_id -- the provider's own id when
+    # available, otherwise a deterministic hash of the event's
+    # match/type/minute/team/player (see
+    # `football_service._synthetic_event_key`) -- so re-syncing the same
+    # match upserts existing events in place instead of duplicating them,
+    # and an event's database id stays stable across polls (change
+    # detection relies on this to tell "existing event" apart from "new
+    # event").
+    __table_args__ = (
+        UniqueConstraint("match_id", "provider_id", name="uq_match_events_match_provider"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
