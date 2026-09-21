@@ -169,7 +169,7 @@ FIXTURES: list[dict] = [
     ),
     dict(
         provider_id="epl-3", competition="comp-epl", home="t-mun", away="t-avl",
-        kind="finished_yesterday", hour=17, home_score=2, away_score=2,
+        kind="finished_today", hour=9, home_score=2, away_score=2,
         venue="Old Trafford",
         events=[
             dict(minute=14, type="goal", side="away", player="p-watkins", assist="p-bailey"),
@@ -196,7 +196,7 @@ FIXTURES: list[dict] = [
     ),
     dict(
         provider_id="ll-2", competition="comp-laliga", home="t-sev", away="t-bet",
-        kind="finished_yesterday", hour=20, home_score=0, away_score=1,
+        kind="finished_today", hour=11, home_score=0, away_score=1,
         venue="Ramón Sánchez-Pizjuán",
         events=[
             dict(minute=67, type="goal", side="away", player="p-isco", assist="p-fornals"),

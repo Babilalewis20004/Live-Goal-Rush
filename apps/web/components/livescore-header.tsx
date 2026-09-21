@@ -1,6 +1,7 @@
 "use client"
 
 import { Search } from "lucide-react"
+import Link from "next/link"
 import { useEffect, useState } from "react"
 
 export function LivescoreHeader({ liveCount }: { liveCount: number }) {
@@ -38,13 +39,13 @@ export function LivescoreHeader({ liveCount }: { liveCount: number }) {
           </div>
         </div>
 
-        <button
-          type="button"
-          aria-label="Search matches"
+        <Link
+          href="/search"
+          aria-label="Search matches, teams and competitions"
           className="ml-auto grid h-9 w-9 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white"
         >
           <Search className="h-4 w-4" />
-        </button>
+        </Link>
       </div>
     </header>
   )

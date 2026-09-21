@@ -1,48 +1,37 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import Link from "next/link"
 import { ChevronLeft, ChevronRight, Flame } from "lucide-react"
-import type { League, Match } from "@/lib/matches"
+import type { MatchSummary } from "@/types/api"
 import { TeamBadge } from "./team-badge"
 import { LeagueLogo } from "./league-logo"
+import { LiveIndicator } from "./ui/live-indicator"
 
-type Highlight = {
-  match: Match
-  leagueName: string
-  leagueColor: string
-}
-
-function buildHighlights(leagues: League[]): Highlight[] {
-  const rank = (m: Match) => (m.status === "live" ? 0 : m.status === "halftime" ? 1 : 2)
-  return leagues
-    .flatMap((l) => l.matches.map((match) => ({ match, leagueName: l.name, leagueColor: l.color })))
-    .filter((h) => h.match.status === "live" || h.match.status === "halftime")
-    .sort((a, b) => rank(a.match) - rank(b.match))
-}
-
-function statusLabel(m: Match) {
+function statusLabel(m: MatchSummary) {
   if (m.status === "halftime") return "HT"
   if (m.status === "live") return `${m.minute}'`
   return ""
 }
 
-export function HighlightCarousel({ leagues }: { leagues: League[] }) {
-  const highlights = buildHighlights(leagues)
+export function HighlightCarousel({ matches }: { matches: MatchSummary[] }) {
   const [index, setIndex] = useState(0)
   const [paused, setPaused] = useState(false)
   const trackRef = useRef<HTMLDivElement>(null)
 
-  const count = highlights.length
+  const count = matches.length
 
-  const scrollTo = useCallback((i: number) => {
-    const track = trackRef.current
-    if (!track) return
-    const clamped = (i + count) % count
-    const child = track.children[clamped] as HTMLElement | undefined
-    if (child) track.scrollTo({ left: child.offsetLeft, behavior: "smooth" })
-  }, [count])
+  const scrollTo = useCallback(
+    (i: number) => {
+      const track = trackRef.current
+      if (!track) return
+      const clamped = (i + count) % count
+      const child = track.children[clamped] as HTMLElement | undefined
+      if (child) track.scrollTo({ left: child.offsetLeft, behavior: "smooth" })
+    },
+    [count],
+  )
 
-  // keep index synced with manual scroll
   useEffect(() => {
     const track = trackRef.current
     if (!track) return
@@ -72,7 +61,6 @@ export function HighlightCarousel({ leagues }: { leagues: League[] }) {
     }
   }, [])
 
-  // auto-advance
   useEffect(() => {
     if (paused || count <= 1) return
     const id = setInterval(() => scrollTo(index + 1), 4000)
@@ -118,15 +106,15 @@ export function HighlightCarousel({ leagues }: { leagues: League[] }) {
         ref={trackRef}
         className="ls-no-scrollbar flex snap-x snap-mandatory gap-3 overflow-x-auto scroll-smooth pb-1"
       >
-        {highlights.map((h) => (
-          <HighlightCard key={h.match.id} highlight={h} />
+        {matches.map((m) => (
+          <HighlightCard key={m.id} match={m} />
         ))}
       </div>
 
       <div className="mt-2 flex items-center justify-center gap-1.5">
-        {highlights.map((h, i) => (
+        {matches.map((m, i) => (
           <button
-            key={h.match.id}
+            key={m.id}
             type="button"
             aria-label={`Go to highlight ${i + 1}`}
             onClick={() => scrollTo(i)}
@@ -141,53 +129,43 @@ export function HighlightCarousel({ leagues }: { leagues: League[] }) {
   )
 }
 
-function HighlightCard({ highlight }: { highlight: Highlight }) {
-  const { match: m, leagueName, leagueColor } = highlight
+function HighlightCard({ match: m }: { match: MatchSummary }) {
   return (
-    <article
+    <Link
+      href={`/match/${m.id}`}
       className="relative w-full min-w-full snap-center overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04] p-4"
       style={{ boxShadow: `inset 0 1px 0 0 rgba(255,255,255,0.05)` }}
     >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full opacity-20 blur-2xl"
-        style={{ backgroundColor: leagueColor }}
-      />
       <div className="relative mb-3 flex items-center justify-between">
-        <span
-          className="flex items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2.5 text-[10px] font-semibold uppercase tracking-wide text-white/90"
-          style={{ backgroundColor: `${leagueColor}55` }}
-        >
-          <LeagueLogo name={leagueName} color={leagueColor} size={16} />
-          {leagueName}
+        <span className="flex items-center gap-1.5 rounded-full bg-white/[0.06] py-0.5 pl-1 pr-2.5 text-[10px] font-semibold uppercase tracking-wide text-white/90">
+          <LeagueLogo name={m.competition.name} logoUrl={m.competition.logo_url} size={16} />
+          {m.competition.name}
         </span>
         <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
-          <span className="ls-live-dot h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          <LiveIndicator />
           {statusLabel(m)}
         </span>
       </div>
 
       <div className="relative flex items-center justify-between gap-2">
         <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
-          <TeamBadge team={m.home} size={40} />
-          <span className="truncate text-center text-xs font-medium text-white/80">{m.home.name}</span>
+          <TeamBadge name={m.home_team.name} shortName={m.home_team.short_name} logoUrl={m.home_team.logo_url} size={40} />
+          <span className="truncate text-center text-xs font-medium text-white/80">{m.home_team.name}</span>
         </div>
 
         <div className="flex shrink-0 flex-col items-center px-2">
           <div className="flex items-center gap-2 text-3xl font-bold tabular-nums text-white">
-            <span className={m.homeScore >= m.awayScore ? "" : "text-white/40"}>{m.homeScore}</span>
+            <span className={m.home_score >= m.away_score ? "" : "text-white/40"}>{m.home_score}</span>
             <span className="text-white/30">-</span>
-            <span className={m.awayScore >= m.homeScore ? "" : "text-white/40"}>{m.awayScore}</span>
+            <span className={m.away_score >= m.home_score ? "" : "text-white/40"}>{m.away_score}</span>
           </div>
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
-          <TeamBadge team={m.away} size={40} />
-          <span className="truncate text-center text-xs font-medium text-white/80">{m.away.name}</span>
+          <TeamBadge name={m.away_team.name} shortName={m.away_team.short_name} logoUrl={m.away_team.logo_url} size={40} />
+          <span className="truncate text-center text-xs font-medium text-white/80">{m.away_team.name}</span>
         </div>
       </div>
-
-      {m.note && <p className="relative mt-3 text-center text-[11px] text-white/40">{m.note}</p>}
-    </article>
+    </Link>
   )
 }
