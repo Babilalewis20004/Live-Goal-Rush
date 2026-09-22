@@ -1,11 +1,16 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
+import { AuthProvider } from '@/lib/auth-context'
+import { NavBar } from '@/components/nav-bar'
+import { ServiceWorkerRegister } from '@/components/service-worker-register'
+import { getServerUser } from '@/lib/server-auth'
 
 export const metadata: Metadata = {
   title: 'LivePitch · Live Football Scores',
   description: 'Real-time livescores for major football leagues — Champions League, Premier League, LaLiga, Serie A, Bundesliga and Ligue 1.',
   generator: 'v0.app',
+  manifest: '/manifest.json',
   icons: {
     icon: [
       {
@@ -30,15 +35,21 @@ export const viewport: Viewport = {
   themeColor: '#070b09',
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  const initialUser = await getServerUser()
+
   return (
     <html lang="en">
       <body className="antialiased bg-[#070b09] text-white">
-        {children}
+        <AuthProvider initialUser={initialUser}>
+          <ServiceWorkerRegister />
+          <NavBar />
+          {children}
+        </AuthProvider>
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>

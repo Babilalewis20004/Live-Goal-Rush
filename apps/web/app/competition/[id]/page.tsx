@@ -6,6 +6,7 @@ import { MatchCard } from "@/components/match-card"
 import { TeamBadge } from "@/components/team-badge"
 import { EmptyState } from "@/components/ui/empty-state"
 import { api, ApiError } from "@/lib/api"
+import { getServerFavourites } from "@/lib/server-auth"
 
 export const dynamic = "force-dynamic"
 
@@ -22,10 +23,12 @@ export default async function CompetitionPage({ params }: { params: Promise<{ id
     throw error
   }
 
-  const [fixtures, standings] = await Promise.all([
+  const [fixtures, standings, favourites] = await Promise.all([
     api.getCompetitionFixtures(competitionId),
     api.getStandings(competitionId),
+    getServerFavourites(),
   ])
+  const initialFollowed = favourites?.competitions.some((f) => f.competition.id === competitionId) ?? false
 
   return (
     <main className="relative min-h-screen text-white">
@@ -36,7 +39,7 @@ export default async function CompetitionPage({ params }: { params: Promise<{ id
         </Link>
 
         <div className="mt-4">
-          <CompetitionHeader competition={competition} />
+          <CompetitionHeader competition={competition} initialFollowed={initialFollowed} />
         </div>
 
         <section className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">

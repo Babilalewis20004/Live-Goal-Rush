@@ -25,3 +25,23 @@ class MatchEventType(str, enum.Enum):
     RED_CARD = "red_card"
     SUBSTITUTION = "substitution"
     VAR = "var"
+
+
+class DevicePlatform(str, enum.Enum):
+    """Phase 3 §16: a user may register several of these (phone, tablet,
+    browser) -- never assumed to be one-to-one with a user."""
+
+    EXPO_IOS = "expo_ios"
+    EXPO_ANDROID = "expo_android"
+    WEB = "web"
+
+
+class NotificationScope(str, enum.Enum):
+    """What a `NotificationPreference` row narrows to (Phase 3 §14).
+    `GLOBAL` preferences have `scope_id = None`; the others pair with a
+    team/competition/match id."""
+
+    GLOBAL = "global"
+    TEAM = "team"
+    COMPETITION = "competition"
+    MATCH = "match"

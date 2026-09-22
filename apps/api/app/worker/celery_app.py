@@ -28,7 +28,8 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-# Imported for their side effects: `tasks` registers every @celery_app.task,
-# `schedule` sets celery_app.conf.beat_schedule. Both need to happen
-# whenever this module is imported (by either the worker or beat process).
-from app.worker import schedule, tasks  # noqa: E402,F401
+# Imported for their side effects: `tasks`/`notification_tasks` each
+# register their @celery_app.task functions, `schedule` sets
+# celery_app.conf.beat_schedule. All need to happen whenever this module
+# is imported (by either the worker or beat process).
+from app.worker import notification_tasks, schedule, tasks  # noqa: E402,F401

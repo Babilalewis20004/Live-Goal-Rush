@@ -8,14 +8,14 @@ changed (spec §11/§13). Tasks never talk to WebSocket connections directly
 -- that's `app/websocket/pubsub_bridge.py`'s job, in the API process.
 
 Each task opens its own `AsyncSessionLocal` and runs on a persistent
-per-worker-process event loop (see `_run` below) -- Celery's task
-execution model is synchronous, so this is the bridge into the same async
-DB/provider code the API uses, rather than a second implementation of it.
+per-worker-process event loop (see `app.worker.async_runner.run`) --
+Celery's task execution model is synchronous, so this is the bridge into
+the same async DB/provider code the API uses, rather than a second
+implementation of it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +32,7 @@ from app.services.change_detection import build_state_snapshot, detect_changes
 from app.services.football_service import FootballService
 from app.services.providers import get_provider
 from app.services.providers.base import FootballDataProvider
+from app.worker.async_runner import run as _run
 from app.worker.celery_app import celery_app
 from app.worker.provider_guard import ProviderUnavailableError, call_with_backoff
 from app.services.metrics import metrics
@@ -41,31 +42,15 @@ logger = logging.getLogger(__name__)
 _NEAR_KICKOFF_WINDOW = timedelta(minutes=15)
 _POST_MATCH_WINDOW = timedelta(minutes=30)
 
-_worker_loop: asyncio.AbstractEventLoop | None = None
-
-
-def _run(coro):
-    """Runs `coro` to completion on one event loop that lives for this
-    worker process's whole lifetime, not a fresh one per task.
-
-    `asyncio.run()` per task looks correct but isn't: `app.db.session`'s
-    async SQLAlchemy engine (and its pooled asyncpg connections) is a
-    process-wide singleton created on first use, and asyncpg connections
-    are bound to the event loop they were opened on. A prefork Celery
-    worker executes many tasks over its process lifetime; tearing down and
-    recreating the loop on every single one (what `asyncio.run` does)
-    leaves the *next* task's pooled connections attached to a now-dead
-    loop, which surfaces as an intermittent
-    `RuntimeError: ... got Future ... attached to a different loop`.
-    """
-    global _worker_loop
-    if _worker_loop is None or _worker_loop.is_closed():
-        _worker_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_worker_loop)
-    return _worker_loop.run_until_complete(coro)
-
 
 def _publish_changes(match: MatchDetail) -> None:
+    # Deferred import: `notification_tasks` imports `celery_app`, which
+    # (at module scope) imports `tasks` back for its own side effects --
+    # importing it at call time instead of at this module's top avoids a
+    # load-order-dependent circular import (whichever of the three modules
+    # happens to be imported first).
+    from app.worker.notification_tasks import dispatch_notifications
+
     redis = get_sync_redis_service()
     state_key = RedisKeys.match_state(match.id)
     previous = redis.get(state_key)
@@ -77,7 +62,17 @@ def _publish_changes(match: MatchDetail) -> None:
 
     for event in changes:
         logger.info("Match %s changed: %s", match.id, event.type.value)
-        redis.publish(RedisKeys.MATCH_EVENTS_CHANNEL, event.model_dump(mode="json"))
+        payload = event.model_dump(mode="json")
+        redis.publish(RedisKeys.MATCH_EVENTS_CHANNEL, payload)
+        # A second, independent consumer of the same event (Phase 3 §12) --
+        # dispatched as its own Celery task (not called inline) so a slow
+        # or failing push provider can never slow down or crash the live
+        # sync loop, and gets its own retry semantics separate from
+        # provider-sync retries.
+        try:
+            dispatch_notifications.delay(payload)
+        except Exception:
+            logger.warning("Failed to enqueue dispatch_notifications for match %s", match.id, exc_info=True)
 
 
 async def _sync_one_match(provider: FootballDataProvider, provider_match) -> None:

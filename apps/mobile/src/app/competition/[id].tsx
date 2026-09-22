@@ -3,18 +3,22 @@ import { useCallback, useEffect, useState } from "react"
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
+import { FavouriteButton } from "@/components/favourite-button"
 import { LoadingState } from "@/components/loading-state"
 import { MatchCard } from "@/components/match-card"
 import { TeamBadge } from "@/components/team-badge"
+import { useAuth } from "@/hooks/use-auth"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
 import type { CompetitionOut, MatchSummary, StandingEntry } from "@/types/api"
 
 export default function CompetitionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
+  const { user } = useAuth()
   const [competition, setCompetition] = useState<CompetitionOut | null>(null)
   const [fixtures, setFixtures] = useState<MatchSummary[]>([])
   const [standings, setStandings] = useState<StandingEntry[]>([])
+  const [initialFollowed, setInitialFollowed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,20 +26,22 @@ export default function CompetitionScreen() {
     setError(null)
     try {
       const competitionId = Number(id)
-      const [comp, fixturesPage, standingsList] = await Promise.all([
+      const [comp, fixturesPage, standingsList, favourites] = await Promise.all([
         api.getCompetition(competitionId),
         api.getCompetitionFixtures(competitionId),
         api.getStandings(competitionId),
+        user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
       ])
       setCompetition(comp)
       setFixtures(fixturesPage.items)
       setStandings(standingsList)
+      setInitialFollowed(favourites?.competitions.some((f) => f.competition.id === competitionId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Competition not found." : "Unable to load this competition.")
     } finally {
       setLoading(false)
     }
-  }, [id])
+  }, [id, user])
 
   useEffect(() => {
     const handle = setTimeout(load, 0)
@@ -62,12 +68,13 @@ export default function CompetitionScreen() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={styles.headerCard}>
         <TeamBadge name={competition.name} logoUrl={competition.logo_url} size={44} />
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>{competition.name}</Text>
           <Text style={styles.headerSubtitle}>
             {competition.country ?? "International"} · {competition.type}
           </Text>
         </View>
+        <FavouriteButton kind="competition" id={competition.id} initialFollowed={initialFollowed} />
       </View>
 
       <View style={styles.card}>

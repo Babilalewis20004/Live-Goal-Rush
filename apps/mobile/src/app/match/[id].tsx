@@ -4,9 +4,11 @@ import { useCallback, useEffect, useState } from "react"
 import { ScrollView, StyleSheet, Text, View } from "react-native"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
+import { FavouriteButton } from "@/components/favourite-button"
 import { LoadingState } from "@/components/loading-state"
 import { TeamBadge } from "@/components/team-badge"
 import { ConnectionBadge } from "@/components/connection-badge"
+import { useAuth } from "@/hooks/use-auth"
 import { useMatchDetail } from "@/hooks/use-match-detail"
 import { api, ApiError } from "@/lib/api"
 import { formatKickoff, formatKickoffDate } from "@/lib/format"
@@ -23,20 +25,28 @@ function statusLabel(status: string, minute: number | null): string {
 
 export default function MatchScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
+  const { user } = useAuth()
   const [initialMatch, setInitialMatch] = useState<MatchDetail | null>(null)
+  const [initialFollowed, setInitialFollowed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      setInitialMatch(await api.getMatch(Number(id)))
+      const matchId = Number(id)
+      const [match, favourites] = await Promise.all([
+        api.getMatch(matchId),
+        user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
+      ])
+      setInitialMatch(match)
+      setInitialFollowed(favourites?.matches.some((f) => f.match.id === matchId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Match not found." : "Unable to load this match.")
     } finally {
       setLoading(false)
     }
-  }, [id])
+  }, [id, user])
 
   useEffect(() => {
     const handle = setTimeout(load, 0)
@@ -59,17 +69,24 @@ export default function MatchScreen() {
     )
   }
 
-  return <LiveMatchScreen initialMatch={initialMatch} />
+  return <LiveMatchScreen initialMatch={initialMatch} initialFollowed={initialFollowed} />
 }
 
-function LiveMatchScreen({ initialMatch }: { initialMatch: MatchDetail }) {
+function LiveMatchScreen({
+  initialMatch,
+  initialFollowed,
+}: {
+  initialMatch: MatchDetail
+  initialFollowed: boolean
+}) {
   const { match, connectionStatus } = useMatchDetail(initialMatch)
   const isLive = match.status === "live" || match.status === "halftime"
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.headerRow}>
+      <View style={[styles.headerRow, { flexDirection: "row", justifyContent: "flex-end", gap: 8 }]}>
         <ConnectionBadge status={connectionStatus} />
+        <FavouriteButton kind="match" id={match.id} initialFollowed={initialFollowed} />
       </View>
 
       <View style={styles.card}>

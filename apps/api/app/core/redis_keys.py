@@ -43,6 +43,15 @@ class RedisKeys:
     def team_fixtures(team_id: int | str) -> str:
         return f"football:team:{team_id}:fixtures"
 
+    # -- rate limiting (Phase 3 §21) ---------------------------------------
+    @staticmethod
+    def rate_limit(bucket: str, identifier: str) -> str:
+        """Not football-cache data, so deliberately outside the `football:`
+        namespace -- `bucket` is a fixed label (e.g. "login-email",
+        "register") and `identifier` the thing being limited (an IP or
+        email)."""
+        return f"ratelimit:{bucket}:{identifier}"
+
     # -- pub/sub ----------------------------------------------------------
     MATCH_EVENTS_CHANNEL = "football:events"
     """Single Redis Pub/Sub channel the worker publishes RealtimeEvent

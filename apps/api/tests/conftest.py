@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 
 import asyncpg
+import pytest
 import pytest_asyncio
 from fakeredis import aioredis as fakeredis_aioredis
 from httpx import ASGITransport, AsyncClient
@@ -8,10 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import settings
 from app.core.redis_client import RedisService, get_redis_service
+from app.core.security import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import create_app
-from app.models import competition, match, match_event, player, standing, team  # noqa: F401
+from app.models import (  # noqa: F401
+    competition,
+    device,
+    favourite,
+    match,
+    match_event,
+    notification,
+    player,
+    session as session_model,
+    standing,
+    team,
+    user,
+)
+from app.models.user import User
 from app.services.football_service import FootballService
 from app.services.providers import get_provider
 from app.services.providers.mock_provider import MockFootballDataProvider
@@ -20,6 +35,22 @@ _ASYNC_PREFIX = "postgresql+asyncpg://"
 _base_url, _, _dev_db_name = settings.database_url.removeprefix(_ASYNC_PREFIX).rpartition("/")
 _TEST_DB_NAME = f"{_dev_db_name}_test"
 TEST_DATABASE_URL = f"{_ASYNC_PREFIX}{_base_url}/{_TEST_DB_NAME}"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_celery_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test needs a *real* Celery broker round trip -- `.delay()` calls
+    reachable from HTTP endpoints (e.g. `sync_team.delay()` on following a
+    team, in `favourites_service.py`) would otherwise try to publish to
+    whatever `REDIS_URL` points at for real, which is slow (and flaky
+    under load) for something no test asserts on. Patched at the base
+    `Task` class so it covers every current and future `@celery_app.task`,
+    not just the ones known about today. Tests that need to verify actual
+    task *behavior* call the underlying function directly instead of going
+    through `.delay()` (see `test_notification_dispatch.py`)."""
+    from celery.app.task import Task
+
+    monkeypatch.setattr(Task, "delay", lambda self, *args, **kwargs: None)
 
 
 async def _ensure_test_database_exists() -> None:
@@ -92,4 +123,33 @@ async def seeded_client(
     async with session_local() as session:
         service = FootballService(db=session, provider=MockFootballDataProvider())
         await service.sync_all_competitions_and_fixtures()
+    yield client
+
+
+@pytest_asyncio.fixture
+async def test_user(test_engine: AsyncEngine) -> AsyncGenerator[User, None]:
+    """A single persisted user, independent of the `client`/`authenticated_client`
+    fixtures so tests needing a *second* user (cross-user isolation checks)
+    can create one directly instead."""
+    session_local = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+    async with session_local() as session:
+        instance = User(
+            email="test@example.com",
+            hashed_password=hash_password("Sup3rSecret!"),
+            display_name="Test User",
+        )
+        session.add(instance)
+        await session.commit()
+        await session.refresh(instance)
+    yield instance
+
+
+@pytest_asyncio.fixture
+async def authenticated_client(client: AsyncClient, test_user: User) -> AsyncGenerator[AsyncClient, None]:
+    """Same as `client`, but with a valid `access_token` cookie already set
+    for `test_user` -- mints the token directly rather than going through
+    `/auth/login`, since most tests using this fixture care about the
+    endpoint under test, not re-proving login works (that's `test_auth.py`'s
+    job)."""
+    client.cookies.set("access_token", create_access_token(test_user.id))
     yield client

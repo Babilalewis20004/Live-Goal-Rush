@@ -28,16 +28,18 @@ tie the sync pipeline's lifetime and failure modes to the API server's.
 Celery's task execution model is synchronous, but `FootballService`, the
 providers, and the DB session are all `async`. Each task runs its async
 body on **one event loop that lives for the worker process's whole
-lifetime** (`app/worker/tasks.py::_run`), not a fresh `asyncio.run()` per
-task. This isn't just style — `asyncio.run()` per task is actually a bug
-waiting to happen: `app/db/session.py`'s async SQLAlchemy engine (and its
-pooled asyncpg connections) is a process-wide singleton, and asyncpg
-connections are bound to the event loop they were opened on. A prefork
-worker executes many tasks over its process lifetime; tearing down and
-recreating the loop on every single one leaves the *next* task's pooled
-connections attached to a dead loop
+lifetime** (`app/worker/async_runner.py::run` — extracted from
+`worker/tasks.py` in Phase 3 so `worker/notification_tasks.py` can share
+it too), not a fresh `asyncio.run()` per task. This isn't just style —
+`asyncio.run()` per task is actually a bug waiting to happen:
+`app/db/session.py`'s async SQLAlchemy engine (and its pooled asyncpg
+connections) is a process-wide singleton, and asyncpg connections are
+bound to the event loop they were opened on. A prefork worker executes
+many tasks over its process lifetime; tearing down and recreating the
+loop on every single one leaves the *next* task's pooled connections
+attached to a dead loop
 (`RuntimeError: ... got Future ... attached to a different loop`) —
-encountered and fixed during this implementation. See `_run`'s docstring.
+encountered and fixed during this implementation. See `run`'s docstring.
 
 ## Tasks
 
@@ -57,6 +59,15 @@ detection + Pub/Sub publish for whatever meaningfully changed (`realtime.md`).
 
 Schedule assembled in `app/worker/schedule.py`, entirely from `Settings` —
 no interval is hard-coded in task code.
+
+**Phase 3 addition:** `app/worker/notification_tasks.py::dispatch_notifications`
+is not beat-scheduled either — it's enqueued once per `RealtimeEvent`,
+directly from `worker/tasks.py::_publish_changes`, right after the
+existing Redis Pub/Sub publish. It runs in the same `worker` process/queue
+as everything else here (no new Celery queue or service), but as its own
+task with its own retry policy (`bind=True, max_retries=3`), so a slow or
+failing push provider can never slow down or crash the sync tasks above.
+See `docs/architecture/notifications.md` for the full pipeline.
 
 ## Idempotency (spec §24)
 

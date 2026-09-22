@@ -50,6 +50,15 @@ class RedisService:
     async def expire(self, key: str, ttl_seconds: int) -> None:
         await self._client.expire(key, ttl_seconds)
 
+    async def incr(self, key: str, *, ttl_seconds: int) -> int:
+        """Fixed-window rate-limit counter (Phase 3 §21): increments `key`
+        and sets its TTL only on the window's first increment, so the
+        window doesn't keep sliding forward on every subsequent request."""
+        count = await self._client.incr(key)
+        if count == 1:
+            await self._client.expire(key, ttl_seconds)
+        return count
+
     async def publish(self, channel: str, message: dict) -> None:
         await self._client.publish(channel, json.dumps(message))
 
@@ -102,6 +111,12 @@ class SyncRedisService:
 
     def expire(self, key: str, ttl_seconds: int) -> None:
         self._client.expire(key, ttl_seconds)
+
+    def incr(self, key: str, *, ttl_seconds: int) -> int:
+        count = self._client.incr(key)
+        if count == 1:
+            self._client.expire(key, ttl_seconds)
+        return count
 
     def publish(self, channel: str, message: dict) -> None:
         self._client.publish(channel, json.dumps(message))

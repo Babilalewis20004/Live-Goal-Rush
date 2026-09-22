@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import settings
+from app.core.security import create_access_token
 from app.main import create_app
 from app.websocket.manager import ConnectionManager, manager
 
@@ -75,6 +76,39 @@ def test_oversized_message_is_dropped_not_fatal(ws_client):
         ws.send_text("x" * 5000)
         ws.send_json({"type": "PING"})
         assert ws.receive_json() == {"type": "PONG"}
+
+
+def test_valid_token_is_accepted(ws_client):
+    """Phase 3 §5: the documented auth extension point actually does
+    something now -- a valid token still just connects like anonymous."""
+    token = create_access_token(user_id=1)
+    with ws_client.websocket_connect(f"/ws/matches?token={token}"):
+        pass
+
+
+def test_valid_access_token_cookie_is_accepted(ws_client):
+    """Web sends no query param at all -- the browser attaches the
+    httpOnly `access_token` cookie to the WS handshake automatically,
+    same as any other same-origin request."""
+    token = create_access_token(user_id=1)
+    ws_client.cookies.set("access_token", token)
+    with ws_client.websocket_connect("/ws/matches"):
+        pass
+
+
+def test_invalid_token_is_rejected(ws_client):
+    with pytest.raises(WebSocketDisconnect):
+        with ws_client.websocket_connect("/ws/matches?token=not-a-real-token"):
+            pass
+
+
+def test_absent_token_behaves_exactly_as_before(ws_client):
+    """No token -> anonymous connection, unchanged from Phase 2 -- the
+    public real-time experience must not require auth."""
+    before = manager.connection_count()
+    with ws_client.websocket_connect("/ws/matches"):
+        assert manager.connection_count() == before + 1
+    assert manager.connection_count() == before
 
 
 def test_connection_cap_is_enforced(ws_client, monkeypatch):

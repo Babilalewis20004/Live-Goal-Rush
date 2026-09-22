@@ -37,6 +37,9 @@ class Metrics:
         "websocket_messages_sent_total",
         "websocket_connections_opened_total",
         "websocket_disconnections_total",
+        "notifications_sent_total",
+        "notifications_failed_total",
+        "notifications_deduplicated_total",
     )
 
     def __init__(self) -> None:
@@ -98,6 +101,15 @@ class Metrics:
         self._websocket_connections = max(0, self._websocket_connections - 1)
         if self._prom_websocket_connections is not None:
             self._prom_websocket_connections.set(self._websocket_connections)
+
+    def notification_sent(self, amount: int = 1) -> None:
+        self._increment("notifications_sent_total", amount)
+
+    def notification_failed(self, amount: int = 1) -> None:
+        self._increment("notifications_failed_total", amount)
+
+    def notification_deduplicated(self, amount: int = 1) -> None:
+        self._increment("notifications_deduplicated_total", amount)
 
     def set_live_matches(self, count: int) -> None:
         self._live_matches = count

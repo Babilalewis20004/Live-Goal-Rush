@@ -7,7 +7,19 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import competition, match, match_event, player, standing, team  # noqa: F401
+from app.models import (  # noqa: F401
+    competition,
+    device,
+    favourite,
+    match,
+    match_event,
+    notification,
+    player,
+    session,
+    standing,
+    team,
+    user,
+)
 
 config = context.config
 if config.config_file_name is not None:

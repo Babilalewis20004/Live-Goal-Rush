@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import { MapPin } from "lucide-react"
+import { FavouriteButton } from "@/components/favourite-button"
 import { LeagueLogo } from "@/components/league-logo"
 import { TeamBadge } from "@/components/team-badge"
 import { MatchEvent } from "@/components/match-event"
@@ -24,7 +25,13 @@ function statusLabel(status: string, minute: number | null): string {
  * (`app/match/[id]/page.tsx`) does the initial REST fetch so the page
  * still renders real data on first load / with JS disabled; this
  * component takes over from there with `useMatchDetail`'s WebSocket feed. */
-export function MatchDetailLive({ initialMatch }: { initialMatch: MatchDetailType }) {
+export function MatchDetailLive({
+  initialMatch,
+  initialFollowed = false,
+}: {
+  initialMatch: MatchDetailType
+  initialFollowed?: boolean
+}) {
   const { match, connectionStatus } = useMatchDetail(initialMatch)
   const isLive = match.status === "live" || match.status === "halftime"
 
@@ -34,7 +41,10 @@ export function MatchDetailLive({ initialMatch }: { initialMatch: MatchDetailTyp
         <Link href="/" className="text-xs text-white/50 hover:text-white/80">
           ← Back to livescores
         </Link>
-        <ConnectionBadge status={connectionStatus} />
+        <div className="flex items-center gap-2">
+          <ConnectionBadge status={connectionStatus} />
+          <FavouriteButton kind="match" id={match.id} initialFollowed={initialFollowed} />
+        </div>
       </div>
 
       <div className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">

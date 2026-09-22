@@ -2,11 +2,14 @@
 
 A football-only livescore platform inspired by apps like LiveScore, SofaScore
 and Flashscore — with its own branding, architecture and implementation.
-Phase 1 delivered a working, provider-agnostic MVP. **Phase 2 makes it
-real-time**: when a match changes, connected web and mobile clients see it
+Phase 1 delivered a working, provider-agnostic MVP. Phase 2 made it
+real-time: when a match changes, connected web and mobile clients see it
 without refreshing — via a Redis-backed cache/messaging layer, a Celery
 background sync pipeline with adaptive polling, change detection, and
-WebSocket push.
+WebSocket push. **Phase 3 makes it personal**: accounts, favourite
+teams/competitions/matches, and push notifications (mobile + web) driven
+by that same real-time event stream — additive on top of Phase 1/2, never
+required to use the public livescore experience.
 
 ## Features
 
@@ -43,6 +46,29 @@ one API contract.
   (see `docs/architecture/realtime.md`), so the whole pipeline is
   observable end-to-end without any external API credentials
 
+**Phase 3** —
+
+- Accounts: registration, login, logout, password change/reset, secure
+  password storage (bcrypt), JWT access + rotating refresh tokens
+  (httpOnly cookies on web, `expo-secure-store` on mobile), Redis-backed
+  rate limiting on auth endpoints (`docs/architecture/auth.md`)
+- Favourite teams, competitions and matches, with a personalised "Your
+  feed" section layered on top of — never replacing — the existing public
+  livescore board on both web and mobile
+- A notification pipeline that consumes the *same* Phase 2 `RealtimeEvent`
+  stream as the WebSocket layer, as a fully decoupled second consumer:
+  preference matching (per team/competition/match, per event type, with
+  sensible defaults), idempotent delivery (a single
+  `INSERT ... ON CONFLICT` dedup claim — immune to provider resends,
+  Celery retries, and worker restarts alike), and a provider-agnostic
+  push abstraction (`docs/architecture/notifications.md`)
+- Mobile push via Expo (`expo-notifications`) and browser push via Web
+  Push/VAPID, both tapping through to the right match/team/competition
+  screen using the same `{type, id}` deep-link payload
+- WebSocket connections now accept an optional auth token at the
+  documented Phase 2 extension point, without changing anonymous
+  connection behavior at all
+
 ## Architecture
 
 ```
@@ -70,6 +96,8 @@ Full write-ups:
 [api-architecture.md](docs/architecture/api-architecture.md) ·
 [realtime.md](docs/architecture/realtime.md) ·
 [caching.md](docs/architecture/caching.md) ·
+[auth.md](docs/architecture/auth.md) ·
+[notifications.md](docs/architecture/notifications.md) ·
 [background-workers.md](docs/development/background-workers.md) ·
 [websockets.md](docs/development/websockets.md) ·
 [docker.md](docs/deployment/docker.md)
@@ -97,6 +125,8 @@ docker-compose.yml
 | ---------- | ------------------------------------------------------------------- |
 | Backend    | Python, FastAPI, Pydantic, SQLAlchemy 2.x, Alembic, PostgreSQL, httpx, pytest |
 | Real-time  | Redis (cache + Pub/Sub), Celery (worker + beat scheduler), WebSockets (FastAPI/Starlette) |
+| Auth       | JWT (PyJWT), bcrypt (passlib), Redis-backed rate limiting            |
+| Push       | Expo push service (`expo-notifications`), Web Push/VAPID (`pywebpush`) |
 | Web        | Next.js 16 (App Router), TypeScript, React 19, Tailwind CSS v4, Vitest |
 | Mobile     | Expo SDK 57, React Native, Expo Router, TypeScript                  |
 | Infra      | Docker, Docker Compose                                              |
@@ -197,12 +227,17 @@ commit a real `.env` file or real credentials.
 | `WEBSOCKET_HEARTBEAT_SECONDS` / `WEBSOCKET_MAX_CONNECTIONS` | api | WebSocket heartbeat + connection cap |
 | `SYNC_MAX_RETRIES` / `SYNC_BACKOFF_SECONDS` | worker | Provider retry/backoff |
 | `MOCK_LIVE_SECONDS_PER_MINUTE`   | api, worker    | Mock provider's simulated live-match speed |
+| `JWT_SECRET` / `JWT_ALGORITHM` | api | Access token signing — **override `JWT_SECRET` outside local dev** |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` / `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | api | Token lifetimes |
+| `RATE_LIMIT_REGISTER_PER_HOUR` / `RATE_LIMIT_LOGIN_PER_MINUTE` / `RATE_LIMIT_PASSWORD_RESET_PER_HOUR` | api | Redis-backed auth rate limits |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | api, worker | Web Push — blank skips web push registration (not an error) |
 | `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` | web | REST / WebSocket base URLs |
 | `EXPO_PUBLIC_API_URL` / `EXPO_PUBLIC_WS_URL` | mobile | REST / WebSocket base URLs |
 
 Full documentation (defaults, TTL strategy, polling rationale) in
-`apps/api/.env.example`, `docs/architecture/caching.md`, and
-`docs/architecture/realtime.md`.
+`apps/api/.env.example`, `docs/architecture/caching.md`,
+`docs/architecture/realtime.md`, `docs/architecture/auth.md`, and
+`docs/architecture/notifications.md`.
 
 ## Activating a real football data provider
 
@@ -227,21 +262,29 @@ assumes the generous mock provider, not a rate-limited free tier.
 ## Database
 
 SQLAlchemy 2.x models for `Competition`, `Team`, `Player`, `Match`,
-`MatchEvent`, and (Phase 2) `Standing`, with indexes on provider IDs,
-competition/team foreign keys, kickoff time, and match status. Alembic
-manages migrations (`apps/api/alembic/`); `alembic upgrade head`
-initializes a fresh database from scratch, including Phase 2's schema.
+`MatchEvent`, (Phase 2) `Standing`, and (Phase 3) `User`, `RefreshToken`,
+`PasswordResetToken`, `FavouriteTeam`/`FavouriteCompetition`/
+`FavouriteMatch`, `Device`, `NotificationPreference`, `NotificationLog`,
+with indexes on provider IDs, competition/team foreign keys, kickoff time,
+match status, and every Phase 3 user-owned relationship. Alembic manages
+migrations (`apps/api/alembic/`); `alembic upgrade head` initializes a
+fresh database from scratch, including Phase 2 and Phase 3's schema.
 Details: [docs/architecture/database.md](docs/architecture/database.md).
-Redis is a cache + messaging layer only — never the source of truth; see
+Redis is a cache + messaging layer only — never the source of truth,
+including for Phase 3's user relationships; see
 [docs/architecture/caching.md](docs/architecture/caching.md).
 
 ## API
 
-Versioned REST API under `/api/v1` — matches, competitions, teams, and
-search — plus `/ws/matches` and `/ws/matches/{id}` for real-time push.
+Versioned REST API under `/api/v1` — matches, competitions, teams,
+search, plus Phase 3's `auth`, `users`, `favourites`, `devices`, and
+`notifications` — and `/ws/matches`/`/ws/matches/{id}` for real-time push
+(now accepting an optional auth token; see `docs/architecture/auth.md`).
 Full interactive REST docs at `/docs` (Swagger UI) once the API is running.
 Details: [docs/architecture/api-architecture.md](docs/architecture/api-architecture.md),
-[docs/architecture/realtime.md](docs/architecture/realtime.md).
+[docs/architecture/realtime.md](docs/architecture/realtime.md),
+[docs/architecture/auth.md](docs/architecture/auth.md),
+[docs/architecture/notifications.md](docs/architecture/notifications.md).
 
 ## Testing
 
@@ -249,8 +292,9 @@ Details: [docs/architecture/api-architecture.md](docs/architecture/api-architect
   its time-evolving live-match simulation), the service layer's cache-aside
   reads, all REST endpoints, pagination/error/validation handling, the
   Redis service and cache-aside layer, change detection, event
-  idempotency/dedup, provider retry/backoff, and the WebSocket connection
-  manager + endpoints.
+  idempotency/dedup, provider retry/backoff, the WebSocket connection
+  manager + endpoints, and (Phase 3) auth, favourites, devices/preferences,
+  notification preference-matching/dedup, and notification delivery.
 - Web: `cd apps/web && npx tsc --noEmit && npx eslint . && npm test` —
   `npm test` (Vitest) covers the WebSocket client's reconnect/backoff/
   heartbeat behavior and the real-time hooks' pure update logic (applying
@@ -258,30 +302,30 @@ Details: [docs/architecture/api-architecture.md](docs/architecture/api-architect
 - Mobile: `cd apps/mobile && npx tsc --noEmit && npx expo lint` — mirrors
   web's hooks/client by construction (same contract, parallel
   implementation); no separate React Native test harness was added in
-  Phase 2 (see Known limitations).
+  Phase 2 or Phase 3 (see Known limitations).
 
-## Roadmap (Phase 3+)
+## Roadmap (Phase 4+)
 
-Deliberately out of scope for Phase 2, but the architecture (adaptive
-polling, change detection, Pub/Sub, cache-aside reads) is designed not to
-need a rewrite for these:
+Deliberately out of scope for Phase 3, but the architecture is designed
+not to need a rewrite for these:
 
-- Push notifications (goal alerts, match start/finish) — the event model
-  (`app/events/schemas.py`) is already the natural source for these
 - Advanced match statistics (possession, shots, xG) and player statistics
-- User accounts + WebSocket authentication (the connection layer is
-  already structured with an auth check extension point)
+- Real transactional email delivery (password reset currently logs the
+  link server-side and returns it in dev-only responses — see
+  `docs/architecture/auth.md`)
 - Cross-process metrics aggregation (Prometheus multiprocess mode) instead
   of per-process-only `/metrics`
 - Betting odds, advertisements, subscriptions/payments
 - Social features, AI features, chat
 - A real automated type-sharing pipeline between the FastAPI schemas and
   the TypeScript clients (e.g. `openapi-typescript`), replacing the
-  hand-synced `packages/shared/types.ts` (now including the WebSocket
-  message contract too)
+  hand-synced `packages/shared/types.ts`
 - A React Native test harness for the mobile hooks (currently verified by
   typecheck/lint + manual testing, matching web's hook contract by
   construction — see Known limitations)
+- Per-team/competition/match notification preference overrides in the web/
+  mobile UI (the API already supports any scope; the bundled settings
+  screens only expose the GLOBAL-scope defaults)
 
 ## Known limitations
 
@@ -300,6 +344,20 @@ need a rewrite for these:
   cache/WebSocket counters; the worker's provider/sync counters are
   visible in its logs, not yet aggregated into one scrape target) — see
   `app/services/metrics.py`'s docstring and the Roadmap.
+- Mobile push notifications require this Expo project to be linked to an
+  EAS project (`expo.dev` account, `eas init`) before a real push token
+  can be obtained — an external, one-time setup step outside this
+  repository's code. `registerForPushNotificationsAsync` degrades
+  gracefully (logs a warning, skips registration) without it.
+- No real email delivery — password reset links are logged server-side
+  and returned directly in the API response in non-production
+  environments (see `docs/architecture/auth.md`), matching this repo's
+  existing "mock provider" approach to infrastructure this environment
+  doesn't have credentials for.
+- Notification preference UI (web + mobile) only exposes GLOBAL-scope
+  toggles for the five default-on event types; per-favourite overrides are
+  supported by the API (`scope_type=team|competition|match`) but not yet
+  surfaced in either client's settings screen.
 - The mock provider's simulated live-match progression (real time, ~2s per
   simulated minute by default) means kickoff times reported for "live"
   fixtures drift from wall-clock reality the longer a process runs — a

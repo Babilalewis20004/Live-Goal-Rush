@@ -182,6 +182,11 @@ real matches change on their own.
   connection is even accepted — a client cannot subscribe to an arbitrary
   string as if it were a resource (spec §29).
 
+Both endpoints accept an **optional** auth token (Phase 3, see
+`docs/architecture/auth.md`) — absent, they behave exactly as described
+below, unchanged from Phase 2; present-but-invalid closes the connection.
+Authentication is never required to receive the public real-time feed.
+
 Message shape (`app/api/v1/websocket.py` + `app/websocket/pubsub_bridge.py`):
 
 ```json

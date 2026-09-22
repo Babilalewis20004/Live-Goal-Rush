@@ -144,3 +144,77 @@ export interface RealtimeMessage {
   type: RealtimeEventType
   match: RealtimeMatchPayload
 }
+
+// -- Phase 3: accounts, favourites, notifications --
+
+export interface UserOut {
+  id: number
+  email: string
+  display_name: string | null
+  created_at: string
+}
+
+export interface AuthTokens {
+  access_token: string
+  refresh_token: string
+  token_type: string
+}
+
+/** `tokens` is only populated when the request identified itself as
+ * mobile (`X-Client: mobile`) -- the web client relies on the httpOnly
+ * cookies set alongside this same response instead. */
+export interface AuthResponse {
+  user: UserOut
+  tokens: AuthTokens | null
+}
+
+export interface FavouriteTeamOut {
+  id: number
+  created_at: string
+  team: TeamOut
+}
+
+export interface FavouriteCompetitionOut {
+  id: number
+  created_at: string
+  competition: CompetitionOut
+}
+
+export interface FavouriteMatchOut {
+  id: number
+  created_at: string
+  match: MatchSummary
+}
+
+export interface FavouritesOut {
+  teams: FavouriteTeamOut[]
+  competitions: FavouriteCompetitionOut[]
+  matches: FavouriteMatchOut[]
+}
+
+export type DevicePlatform = "expo_ios" | "expo_android" | "web"
+
+export interface DeviceRegisterInput {
+  platform: DevicePlatform
+  expo_push_token?: string
+  web_push_endpoint?: string
+  web_push_p256dh?: string
+  web_push_auth?: string
+}
+
+export interface DeviceOut {
+  id: number
+  platform: DevicePlatform
+  last_seen_at: string | null
+  created_at: string
+}
+
+export type NotificationScope = "global" | "team" | "competition" | "match"
+
+export interface NotificationPreferenceOut {
+  id: number
+  scope_type: NotificationScope
+  scope_id: number | null
+  event_type: RealtimeEventType
+  enabled: boolean
+}

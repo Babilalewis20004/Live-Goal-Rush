@@ -56,6 +56,27 @@ class Settings(BaseSettings):
     sync_max_retries: int = 3
     sync_backoff_seconds: int = 5
 
+    # -- Auth (Phase 3) ---------------------------------------------------------
+    # Safe local-dev default so the app still boots without a `.env` --
+    # every real deployment MUST override this via the environment.
+    jwt_secret: str = "dev-insecure-secret-change-me-before-deploying-anywhere-real"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 30
+    password_reset_token_expire_minutes: int = 30
+
+    # -- Rate limiting (Phase 3) -- Redis fixed-window counters (§21) ----------
+    rate_limit_register_per_hour: int = 5
+    rate_limit_login_per_minute: int = 10
+    rate_limit_password_reset_per_hour: int = 5
+
+    # -- Push notifications (Phase 3 §17/§18/§19) -- Web Push (VAPID). Empty
+    # by default: web push registration is skipped (not an error) until a
+    # real keypair is configured -- generate one locally, never commit it.
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:admin@example.com"
+
     # -- Mock provider live-match time simulation ------------------------------
     # The bundled mock provider has no real upstream to change over time, so
     # Phase 2 makes its "live" fixtures progress deterministically from the

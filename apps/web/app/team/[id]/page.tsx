@@ -5,6 +5,7 @@ import { TeamHeader } from "@/components/team-header"
 import { MatchCard } from "@/components/match-card"
 import { EmptyState } from "@/components/ui/empty-state"
 import { api, ApiError } from "@/lib/api"
+import { getServerFavourites } from "@/lib/server-auth"
 
 export const dynamic = "force-dynamic"
 
@@ -21,10 +22,12 @@ export default async function TeamPage({ params }: { params: Promise<{ id: strin
     throw error
   }
 
-  const [fixtures, results] = await Promise.all([
+  const [fixtures, results, favourites] = await Promise.all([
     api.getTeamFixtures(teamId),
     api.getTeamResults(teamId),
+    getServerFavourites(),
   ])
+  const initialFollowed = favourites?.teams.some((f) => f.team.id === teamId) ?? false
 
   return (
     <main className="relative min-h-screen text-white">
@@ -35,7 +38,7 @@ export default async function TeamPage({ params }: { params: Promise<{ id: strin
         </Link>
 
         <div className="mt-4">
-          <TeamHeader team={team} />
+          <TeamHeader team={team} initialFollowed={initialFollowed} />
         </div>
 
         <section className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">

@@ -1,5 +1,6 @@
 import { AnimatedBackground } from "@/components/animated-background"
 import { LivescoreBoard } from "@/components/livescore-board"
+import { PersonalizedHome } from "@/components/personalized-home"
 import { api } from "@/lib/api"
 
 // Live scores must never be static-generated or cached across builds/deploys.
@@ -15,6 +16,7 @@ export default async function Page() {
   return (
     <main className="relative min-h-screen text-white">
       <AnimatedBackground />
+      <PersonalizedHome liveMatches={live} />
       <LivescoreBoard live={live} today={today} upcoming={upcoming} />
     </main>
   )
