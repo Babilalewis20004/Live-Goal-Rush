@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # fixtures): refreshed by the background sync jobs, not by request
     # traffic, so a longer TTL is safe.
     redis_default_ttl_seconds: int = 300
+    # Phase 4: data that effectively never changes once written -- a
+    # finished match's lineups/statistics, squads, player profiles, and
+    # match-context form/head-to-head (which only look at results from
+    # before that match).
+    redis_static_ttl_seconds: int = 3600
 
     # -- WebSockets -----------------------------------------------------------
     websocket_heartbeat_seconds: int = 30
@@ -54,6 +59,10 @@ class Settings(BaseSettings):
 
     # -- Provider sync retry/backoff (§10) -------------------------------------
     sync_max_retries: int = 3
+    # Phase 4: ceiling on on-demand syncs that unauthenticated *reads* may queue
+    # (empty squads, unenriched players) across all entities per minute, so
+    # walking ids can't turn the public API into a provider-quota drain.
+    sync_request_budget_per_minute: int = 20
     sync_backoff_seconds: int = 5
 
     # -- Auth (Phase 3) ---------------------------------------------------------

@@ -1,4 +1,4 @@
-EMPTY_RESULTS = {"teams": [], "competitions": [], "players": []}
+EMPTY_RESULTS = {"teams": [], "competitions": [], "players": [], "matches": []}
 
 
 async def test_search_finds_team(client):

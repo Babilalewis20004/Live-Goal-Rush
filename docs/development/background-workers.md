@@ -55,7 +55,16 @@ detection + Pub/Sub publish for whatever meaningfully changed (`realtime.md`).
 | `sync_post_match` | `POST_MATCH_SYNC_INTERVAL_SECONDS` (60s) | Database-driven post-finish correction window |
 | `sync_fixtures` | `max(UPCOMING_POLL_INTERVAL_SECONDS * 5, 300)`s | Today/tomorrow/7-day window/yesterday, across every fixture |
 | `sync_competitions` | `max(UPCOMING_POLL_INTERVAL_SECONDS * 10, 600)`s | Competition metadata, fixtures, and standings |
-| `sync_team(team_provider_id)` | not scheduled | On-demand team sync — exists as a capability (e.g. for a future "follow this team" feature) without over-scheduling it now |
+| `sync_team(team_provider_id)` | not scheduled | On-demand team sync — following a team, or a team page that finds no stored squad (*Phase 4:* now also syncs the squad) |
+| `sync_player(player_provider_id)` | not scheduled | *(Phase 4)* On-demand player profile sync, queued once per hour by a player page that finds only a stub |
+| `sync_competition_standings(competition_id)` | queued on `MATCH_FINISHED` | *(Phase 4)* Standings + top scorers for one competition; body is `sync_competition_standings_now` so tests/E2E can drive it directly |
+
+**Phase 4 additions inside existing tasks:** `_sync_one_match` (used by
+`sync_live_matches`, `sync_upcoming_kickoffs`, `sync_post_match`) also syncs
+lineups/team statistics/player statistics via `MatchCentreService` when the
+provider's `capabilities` allow it, through `GuardedProvider` (every call
+retried with the Phase 2 backoff); `sync_competitions` also syncs top
+scorers. No new beat entries were needed — see `match-centre.md` §4.
 
 Schedule assembled in `app/worker/schedule.py`, entirely from `Settings` —
 no interval is hard-coded in task code.

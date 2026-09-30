@@ -1,32 +1,81 @@
-import { Ionicons } from "@expo/vector-icons"
 import { useLocalSearchParams } from "expo-router"
-import { useCallback, useEffect, useState } from "react"
-import { ScrollView, StyleSheet, Text, View } from "react-native"
-import { EmptyState } from "@/components/empty-state"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { FlatList, RefreshControl, StyleSheet, Text, View } from "react-native"
+import { ConnectionBadge } from "@/components/connection-badge"
 import { ErrorState } from "@/components/error-state"
 import { FavouriteButton } from "@/components/favourite-button"
 import { LoadingState } from "@/components/loading-state"
-import { TeamBadge } from "@/components/team-badge"
-import { ConnectionBadge } from "@/components/connection-badge"
+import {
+  HeadToHeadSection,
+  LineupHeaderRow,
+  LineupPlayerRow,
+  MatchHeader,
+  StandingRowView,
+  StandingsHeaderRow,
+  StandingsLegend,
+  StatRowView,
+  TimelineRow,
+  buildTimeline,
+} from "@/components/match-centre/rows"
+import {
+  Card,
+  FeatureState,
+  FormStrip,
+  LiveAnnouncer,
+  SectionTitle,
+  StaleBanner,
+  TabBar,
+  type TabDef,
+} from "@/components/match-centre/ui"
 import { useAuth } from "@/hooks/use-auth"
 import { useMatchDetail } from "@/hooks/use-match-detail"
 import { api, ApiError } from "@/lib/api"
-import { formatKickoff, formatKickoffDate } from "@/lib/format"
+import { groupStandings, statRows } from "@/lib/match-centre"
 import { theme } from "@/theme"
-import type { MatchDetail } from "@/types/api"
+import type {
+  Capabilities,
+  HeadToHeadOut,
+  MatchDetail,
+  MatchFormOut,
+  MatchLineupsOut,
+  MatchStatisticsOut,
+  StandingEntry,
+} from "@/types/api"
 
-function statusLabel(status: string, minute: number | null): string {
-  if (status === "live") return `${minute}'`
-  if (status === "halftime") return "Half Time"
-  if (status === "finished") return "Full Time"
-  if (status === "postponed" || status === "cancelled") return status.toUpperCase()
-  return "Scheduled"
+type TabId = "overview" | "timeline" | "stats" | "lineups" | "table"
+
+const TABS: TabDef<TabId>[] = [
+  { id: "overview", label: "Overview" },
+  { id: "timeline", label: "Timeline" },
+  { id: "stats", label: "Stats" },
+  { id: "lineups", label: "Lineups" },
+  { id: "table", label: "Table" },
+]
+
+interface Loaded {
+  match: MatchDetail
+  capabilities: Capabilities | null
+  lineups: MatchLineupsOut | null
+  statistics: MatchStatisticsOut | null
+  form: MatchFormOut | null
+  headToHead: HeadToHeadOut | null
+  standings: StandingEntry[] | null
+}
+
+/** The supplementary resources may each fail on their own (that tab shows an
+ * honest empty state); only the match itself is essential. */
+async function optional<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise
+  } catch {
+    return null
+  }
 }
 
 export default function MatchScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const { user } = useAuth()
-  const [initialMatch, setInitialMatch] = useState<MatchDetail | null>(null)
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [initialFollowed, setInitialFollowed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -35,11 +84,17 @@ export default function MatchScreen() {
     setError(null)
     try {
       const matchId = Number(id)
-      const [match, favourites] = await Promise.all([
-        api.getMatch(matchId),
+      const match = await api.getMatch(matchId)
+      const [capabilities, lineups, statistics, form, headToHead, standings, favourites] = await Promise.all([
+        optional(api.getCapabilities()),
+        optional(api.getMatchLineups(matchId)),
+        optional(api.getMatchStatistics(matchId)),
+        optional(api.getMatchForm(matchId)),
+        optional(api.getMatchHeadToHead(matchId)),
+        optional(api.getStandings(match.competition.id)),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
       ])
-      setInitialMatch(match)
+      setLoaded({ match, capabilities, lineups, statistics, form, headToHead, standings })
       setInitialFollowed(favourites?.matches.some((f) => f.match.id === matchId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Match not found." : "Unable to load this match.")
@@ -61,7 +116,7 @@ export default function MatchScreen() {
     )
   }
 
-  if (error || !initialMatch) {
+  if (error || !loaded) {
     return (
       <View style={styles.screen}>
         <ErrorState message={error ?? "Unable to load this match."} onRetry={load} />
@@ -69,189 +124,196 @@ export default function MatchScreen() {
     )
   }
 
-  return <LiveMatchScreen initialMatch={initialMatch} initialFollowed={initialFollowed} />
+  return <MatchCentre loaded={loaded} initialFollowed={initialFollowed} />
 }
 
-function LiveMatchScreen({
-  initialMatch,
-  initialFollowed,
-}: {
-  initialMatch: MatchDetail
-  initialFollowed: boolean
-}) {
-  const { match, connectionStatus } = useMatchDetail(initialMatch)
-  const isLive = match.status === "live" || match.status === "halftime"
+interface Row {
+  key: string
+  node: ReactNode
+}
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={[styles.headerRow, { flexDirection: "row", justifyContent: "flex-end", gap: 8 }]}>
+function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollowed: boolean }) {
+  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings, refresh } = useMatchDetail(
+    loaded.match,
+    { lineups: loaded.lineups, statistics: loaded.statistics, standings: loaded.standings },
+    loaded.capabilities,
+  )
+  const { capabilities, form, headToHead } = loaded
+  const [tab, setTab] = useState<TabId>("overview")
+  const [refreshing, setRefreshing] = useState(false)
+  const isLive = match.status === "live" || match.status === "halftime"
+  const notStarted = match.status === "scheduled" || match.status === "postponed" || match.status === "cancelled"
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true)
+    await refresh()
+    setRefreshing(false)
+  }, [refresh])
+
+  // Rows are built per tab so FlatList only mounts what's on screen (a
+  // standings table or a squad can be dozens of rows); single-card tabs are
+  // simply one row.
+  const rows = useMemo<Row[]>(() => {
+    const out: Row[] = []
+    if (tab === "overview") {
+      out.push({
+        key: "form",
+        node: (
+          <Card>
+            <SectionTitle>Form</SectionTitle>
+            {form ? (
+              <View style={{ gap: 14 }}>
+                <FormStrip form={form.home} title={match.home_team.name} />
+                <FormStrip form={form.away} title={match.away_team.name} />
+              </View>
+            ) : (
+              <Text style={styles.faint}>Form isn&apos;t available right now.</Text>
+            )}
+            <Text style={[styles.faint, { marginTop: 10 }]}>
+              Results before this match only. Historical information, not a prediction.
+            </Text>
+          </Card>
+        ),
+      })
+      out.push({
+        key: "h2h",
+        node: (
+          <Card>
+            {headToHead ? (
+              <HeadToHeadSection match={match} data={headToHead} />
+            ) : (
+              <Text style={styles.faint}>Head-to-head isn&apos;t available right now.</Text>
+            )}
+          </Card>
+        ),
+      })
+    } else if (tab === "timeline") {
+      const items = buildTimeline(match)
+      if (items.length === 0) {
+        out.push({
+          key: "no-events",
+          node: (
+            <FeatureState
+              feature="match_events"
+              capabilities={capabilities}
+              pendingMessage={notStarted ? "The timeline starts at kick-off." : "No events have been recorded for this match."}
+            />
+          ),
+        })
+      }
+      for (const item of items) out.push({ key: `e-${item.id}`, node: <TimelineRow item={item} /> })
+    } else if (tab === "stats") {
+      const stats = statRows(statistics)
+      if (stats.length === 0) {
+        out.push({
+          key: "no-stats",
+          node: (
+            <FeatureState
+              feature="match_statistics"
+              capabilities={capabilities}
+              pendingMessage={notStarted ? "Statistics appear once the match is under way." : "No statistics have been supplied for this match."}
+            />
+          ),
+        })
+      }
+      for (const row of stats) {
+        out.push({
+          key: row.key,
+          node: <StatRowView row={row} homeName={match.home_team.name} awayName={match.away_team.name} />,
+        })
+      }
+    } else if (tab === "lineups") {
+      const sides = [lineups?.home, lineups?.away].filter((s): s is NonNullable<typeof s> => !!s)
+      if (sides.length === 0) {
+        out.push({
+          key: "no-lineups",
+          node: (
+            <FeatureState
+              feature="lineups"
+              capabilities={capabilities}
+              pendingMessage={
+                notStarted
+                  ? "Lineups are usually published about an hour before kick-off."
+                  : "Lineups haven't been published for this match."
+              }
+            />
+          ),
+        })
+      }
+      for (const side of sides) {
+        out.push({ key: `h-${side.team.id}`, node: <LineupHeaderRow lineup={side} /> })
+        for (const p of side.starters) out.push({ key: `s-${side.team.id}-${p.player.id}`, node: <LineupPlayerRow entry={p} /> })
+        if (side.substitutes.length > 0) {
+          out.push({ key: `sl-${side.team.id}`, node: <Text style={styles.label}>Substitutes</Text> })
+          for (const p of side.substitutes) out.push({ key: `b-${side.team.id}-${p.player.id}`, node: <LineupPlayerRow entry={p} /> })
+        }
+      }
+    } else if (standings && standings.length > 0) {
+      const highlight = [match.home_team.id, match.away_team.id]
+      for (const { group, rows: groupRows } of groupStandings(standings)) {
+        out.push({
+          key: `th-${group}`,
+          node: <StandingsHeaderRow group={group} season={groupRows[0]?.season ?? ""} />,
+        })
+        for (const row of groupRows) {
+          out.push({
+            key: `t-${group}-${row.team.id}`,
+            node: <StandingRowView row={row} highlighted={highlight.includes(row.team.id)} />,
+          })
+        }
+      }
+      out.push({ key: "legend", node: <StandingsLegend standings={standings} /> })
+    } else {
+      out.push({
+        key: "no-table",
+        node: (
+          <FeatureState feature="standings" capabilities={capabilities} pendingMessage="No table is available for this competition yet." />
+        ),
+      })
+    }
+    return out
+  }, [tab, match, form, headToHead, statistics, lineups, standings, capabilities, notStarted])
+
+  const header = (
+    <View style={{ gap: 12, marginBottom: 12 }}>
+      <View style={styles.topRow}>
         <ConnectionBadge status={connectionStatus} />
         <FavouriteButton kind="match" id={match.id} initialFollowed={initialFollowed} />
       </View>
+      <MatchHeader match={match} />
+      <LiveAnnouncer match={match} />
+      <StaleBanner status={connectionStatus} isLive={isLive} lastUpdatedAt={lastUpdatedAt} />
+      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+    </View>
+  )
 
-      <View style={styles.card}>
-        <Text style={styles.competition}>{match.competition.name}</Text>
-        <View style={styles.scoreRow}>
-          <View style={styles.teamCol}>
-            <TeamBadge name={match.home_team.name} shortName={match.home_team.short_name} logoUrl={match.home_team.logo_url} size={48} />
-            <Text style={styles.teamName} numberOfLines={1}>{match.home_team.name}</Text>
-          </View>
-          <View style={styles.scoreCol}>
-            <Text style={styles.score}>{match.home_score} - {match.away_score}</Text>
-            <View style={[styles.statusPill, isLive && styles.statusPillLive]}>
-              <Text style={[styles.statusText, isLive && styles.statusTextLive]}>
-                {statusLabel(match.status, match.minute)}
-              </Text>
-            </View>
-          </View>
-          <View style={styles.teamCol}>
-            <TeamBadge name={match.away_team.name} shortName={match.away_team.short_name} logoUrl={match.away_team.logo_url} size={48} />
-            <Text style={styles.teamName} numberOfLines={1}>{match.away_team.name}</Text>
-          </View>
-        </View>
-        <Text style={styles.meta}>
-          {formatKickoffDate(match.kickoff_time)} · {formatKickoff(match.kickoff_time)} UTC
-          {match.venue ? `  ·  ${match.venue}` : ""}
-        </Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Match Events</Text>
-        {match.events.length === 0 ? (
-          <EmptyState message="No events yet." />
-        ) : (
-          match.events.map((event) => {
-            const isHome = event.team?.id === match.home_team.id
-            return (
-              <View key={event.id} style={styles.eventRow}>
-                <Text style={styles.eventMinute}>{event.minute}&apos;</Text>
-                <Ionicons
-                  name={
-                    event.event_type === "yellow_card" || event.event_type === "red_card"
-                      ? "square"
-                      : event.event_type === "substitution"
-                        ? "swap-horizontal"
-                        : "football"
-                  }
-                  size={14}
-                  color={
-                    event.event_type === "yellow_card"
-                      ? theme.amber
-                      : event.event_type === "red_card"
-                        ? theme.red
-                        : theme.emerald
-                  }
-                />
-                <Text style={styles.eventText} numberOfLines={1}>
-                  {isHome ? match.home_team.short_name ?? "H" : match.away_team.short_name ?? "A"} · {event.player?.name ?? "Unknown"}
-                </Text>
-              </View>
-            )
-          })
-        )}
-      </View>
-    </ScrollView>
+  return (
+    <FlatList
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      data={rows}
+      keyExtractor={(row) => row.key}
+      renderItem={({ item }) => <View style={tab === "overview" ? styles.rowGap : undefined}>{item.node}</View>}
+      ListHeaderComponent={header}
+      initialNumToRender={14}
+      windowSize={7}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.emerald} />}
+    />
   )
 }
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: theme.background,
-  },
-  content: {
-    padding: 16,
-    gap: 12,
-  },
-  headerRow: {
-    marginBottom: 4,
-    alignItems: "flex-end",
-  },
-  card: {
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    backgroundColor: theme.card,
-    padding: 16,
-    marginBottom: 12,
-  },
-  competition: {
+  screen: { flex: 1, backgroundColor: theme.background },
+  content: { padding: 16, paddingBottom: 48 },
+  rowGap: { marginBottom: 12 },
+  topRow: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: 8 },
+  faint: { color: theme.textFaint, fontSize: 11 },
+  label: {
     color: theme.textFaint,
     fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
-    textAlign: "center",
-    marginBottom: 16,
-  },
-  scoreRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  teamCol: {
-    flex: 1,
-    alignItems: "center",
-    gap: 8,
-  },
-  teamName: {
-    color: theme.text,
-    fontSize: 12,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-  scoreCol: {
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 8,
-  },
-  score: {
-    color: theme.text,
-    fontSize: 28,
-    fontWeight: "800",
-  },
-  statusPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-  },
-  statusPillLive: {
-    backgroundColor: "rgba(52,211,153,0.15)",
-  },
-  statusText: {
-    color: theme.textFaint,
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  statusTextLive: {
-    color: theme.emerald,
-  },
-  meta: {
-    color: theme.textFaint,
-    fontSize: 11,
-    textAlign: "center",
-    marginTop: 16,
-  },
-  sectionTitle: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: "700",
-    marginBottom: 12,
-  },
-  eventRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 6,
-  },
-  eventMinute: {
-    color: theme.textFaint,
-    fontSize: 11,
-    fontWeight: "700",
-    width: 28,
-  },
-  eventText: {
-    color: theme.textMuted,
-    fontSize: 13,
-    flex: 1,
+    paddingTop: 14,
+    paddingBottom: 4,
   },
 })

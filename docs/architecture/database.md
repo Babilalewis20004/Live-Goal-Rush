@@ -97,6 +97,26 @@ served cache-aside from the database like every other read (Phase 1 fetched
 standings live from the provider on every request, since nothing persisted
 them) — the worker's competition sync job keeps this table current.
 
+### Phase 4 additions
+
+See `match-centre.md` §2 for the rationale. Summary (migration `b30168d59097`):
+
+| Table | Purpose | Identity |
+| --- | --- | --- |
+| `match_lineups` | One team's lineup for a match; `formation` only if the provider states it | `(match_id, team_id)` |
+| `lineup_players` | Starter/substitute flag, position, shirt number, provider order | `(lineup_id, player_id)` |
+| `match_statistics` | Team statistics; every numeric column nullable (`NULL` = not supplied) | `(match_id, team_id)` |
+| `player_match_statistics` | Per-player match statistics (nullable columns) | `(match_id, player_id)` |
+| `player_season_statistics` | Totals per competition+season — source of top scorers | `(player_id, competition_id, season)` |
+
+Extended: `match_events.event_detail`; `players.nationality`,
+`shirt_number`, `profile_synced_at`; `teams.venue`; `standings.season`,
+`group_name` (`""` = single table), `description`, `form` — with the
+standings unique constraint now `(competition_id, season, group_name,
+team_id)`. Indexes: `pg_trgm` GIN on `teams.name`/`players.name`/
+`competitions.name`; `(home_team_id, kickoff_time)` and
+`(away_team_id, kickoff_time)` on `matches`.
+
 ## Relationships
 
 ```

@@ -5,6 +5,7 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
 import { LoadingState } from "@/components/loading-state"
+import { MatchCard } from "@/components/match-card"
 import { TeamBadge } from "@/components/team-badge"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
@@ -41,7 +42,12 @@ export default function SearchScreen() {
   }, [query])
 
   const hasQuery = query.trim().length > 0
-  const hasResults = results && (results.teams.length > 0 || results.competitions.length > 0 || results.players.length > 0)
+  const hasResults =
+    results &&
+    (results.teams.length > 0 ||
+      results.competitions.length > 0 ||
+      results.players.length > 0 ||
+      results.matches.length > 0)
 
   return (
     <View style={styles.screen}>
@@ -50,7 +56,7 @@ export default function SearchScreen() {
         <TextInput
           value={query}
           onChangeText={setQuery}
-          placeholder="Search teams, competitions, players…"
+          placeholder="Search teams, players, competitions, matches…"
           placeholderTextColor={theme.textFaint}
           style={styles.input}
         />
@@ -59,7 +65,7 @@ export default function SearchScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         {loading && <LoadingState label="Searching…" />}
         {!loading && error && <ErrorState message={error} />}
-        {!loading && !error && !hasQuery && <EmptyState message="Search for teams, competitions or players." />}
+        {!loading && !error && !hasQuery && <EmptyState message="Search for teams, players, competitions or matches." />}
         {!loading && !error && hasQuery && !hasResults && <EmptyState message={`No results for "${query}".`} />}
 
         {!loading && results && results.teams.length > 0 && (
@@ -94,10 +100,21 @@ export default function SearchScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Players</Text>
             {results.players.map((player) => (
-              <View key={player.id} style={styles.row}>
-                <Text style={styles.rowText}>{player.name}</Text>
-                {player.position && <Text style={styles.position}>{player.position}</Text>}
-              </View>
+              <Link key={player.id} href={{ pathname: "/player/[id]", params: { id: String(player.id) } }} asChild>
+                <Pressable style={styles.row} accessibilityRole="link">
+                  <Text style={styles.rowText}>{player.name}</Text>
+                  {player.position && <Text style={styles.position}>{player.position}</Text>}
+                </Pressable>
+              </Link>
+            ))}
+          </View>
+        )}
+
+        {!loading && results && results.matches.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Matches</Text>
+            {results.matches.map((match) => (
+              <MatchCard key={match.id} match={match} />
             ))}
           </View>
         )}

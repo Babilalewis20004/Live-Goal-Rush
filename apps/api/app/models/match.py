@@ -15,6 +15,10 @@ class Match(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_matches_competition_kickoff", "competition_id", "kickoff_time"),
         Index("ix_matches_status_kickoff", "status", "kickoff_time"),
+        # Form / head-to-head / team fixtures filter on a team and sort by
+        # kickoff (Phase 4).
+        Index("ix_matches_home_team_kickoff", "home_team_id", "kickoff_time"),
+        Index("ix_matches_away_team_kickoff", "away_team_id", "kickoff_time"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -49,5 +53,5 @@ class Match(Base, TimestampMixin):
     home_team: Mapped["Team"] = relationship(foreign_keys=[home_team_id])
     away_team: Mapped["Team"] = relationship(foreign_keys=[away_team_id])
     events: Mapped[list["MatchEvent"]] = relationship(
-        back_populates="match", cascade="all, delete-orphan", order_by="MatchEvent.minute"
+        back_populates="match", cascade="all, delete-orphan", order_by="[MatchEvent.minute, func.coalesce(MatchEvent.extra_minute, 0), MatchEvent.id]"
     )

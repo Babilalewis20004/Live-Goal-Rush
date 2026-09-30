@@ -69,6 +69,28 @@ one API contract.
   documented Phase 2 extension point, without changing anonymous
   connection behavior at all
 
+**Phase 4** —
+
+- A **match centre** on web and mobile: header with LIVE / HALF TIME / FULL
+  TIME / kickoff / POSTPONED / CANCELLED, a chronological timeline
+  (added time, substitutions as "off → on", cards, VAR, penalties),
+  lineups with formation and substitution minutes, team statistics with
+  comparison bars, recent form, head-to-head and the competition table —
+  kept live by the *same* Phase 2 WebSocket, with lineup/statistics updates
+  as new `LINEUP_UPDATED` / `STATISTICS_UPDATED` events
+- Team pages (form, fixtures, results, squad, season statistics), player
+  pages, competition pages (standings with seasons/groups/provider
+  classifications, fixtures, results, top scorers) and database-backed
+  search that now also finds players and matches
+- A **provider capability model** (`GET /api/v1/capabilities`): each
+  provider declares what it really supplies; unsupported features render an
+  honest "not available" state instead of empty boxes, and nothing is
+  fabricated (a statistic the provider didn't send is shown as unavailable,
+  never as 0)
+- Standings re-sync when a match *finishes* (not on every live goal), with
+  event-driven cache invalidation; all new sync is idempotent
+- Full details: `docs/architecture/match-centre.md`
+
 ## Architecture
 
 ```
@@ -309,7 +331,9 @@ Details: [docs/architecture/api-architecture.md](docs/architecture/api-architect
 Deliberately out of scope for Phase 3, but the architecture is designed
 not to need a rewrite for these:
 
-- Advanced match statistics (possession, shots, xG) and player statistics
+- Momentum / attack-pressure visualisations and derived advanced metrics
+  (need a provider that supplies the underlying data — see
+  `docs/architecture/match-centre.md` §9)
 - Real transactional email delivery (password reset currently logs the
   link server-side and returns it in dev-only responses — see
   `docs/architecture/auth.md`)
@@ -328,6 +352,22 @@ not to need a rewrite for these:
   screens only expose the GLOBAL-scope defaults)
 
 ## Known limitations
+
+- **Phase 4 data availability depends on the provider.** With the bundled
+  mock everything is populated (squads are padded with labelled generic
+  players; statistics/history are generated). With the real
+  football-data.org free tier, match events, lineups and match/player
+  statistics are *not available* (declared in `capabilities`), shirt
+  numbers and qualification zones aren't supplied, and dates of birth are
+  intentionally not stored.
+- Head-to-head and form are computed from matches already stored, so they
+  are only as deep as the synced history.
+- Squads and player profiles are fetched lazily: the first visit to a team
+  page may show "squad is still loading" until the worker's on-demand sync
+  completes.
+- Web/mobile match-centre UIs are verified by typecheck/lint, the shared
+  logic's unit tests, a production build and a manual run — not by browser
+  or device automation.
 
 - Dynamic not-found pages on the web app (invalid match/competition/team id)
   render the correct UI but return HTTP 200 instead of 404, per documented

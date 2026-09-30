@@ -37,6 +37,10 @@ class MatchEvent(Base, TimestampMixin):
     player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True, index=True)
     assist_player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    event_detail: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Provider-supplied qualifier for the event type (e.g. "Header").
+    Free text, never interpreted by the backend -- the normalized
+    `event_type` is what drives behaviour."""
 
     match: Mapped["Match"] = relationship(back_populates="events")
     team: Mapped["Team | None"] = relationship(foreign_keys=[team_id])

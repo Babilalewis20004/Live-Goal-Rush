@@ -1,40 +1,88 @@
-import { useLocalSearchParams } from "expo-router"
-import { useCallback, useEffect, useState } from "react"
-import { ScrollView, StyleSheet, Text, View } from "react-native"
+import { Link, useLocalSearchParams } from "expo-router"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { FlatList, Pressable, StyleSheet, Text, View } from "react-native"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
 import { FavouriteButton } from "@/components/favourite-button"
 import { LoadingState } from "@/components/loading-state"
 import { MatchCard } from "@/components/match-card"
+import { SquadRow } from "@/components/match-centre/rows"
+import { Card, FeatureState, FormStrip, SectionTitle, TabBar, type TabDef } from "@/components/match-centre/ui"
 import { TeamBadge } from "@/components/team-badge"
 import { useAuth } from "@/hooks/use-auth"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
-import type { MatchSummary, TeamOut } from "@/types/api"
+import type {
+  Capabilities,
+  MatchSummary,
+  PlayerOut,
+  TeamDetail,
+  TeamFormOut,
+  TeamStatisticsOut,
+} from "@/types/api"
+
+type TabId = "overview" | "fixtures" | "results" | "squad" | "stats"
+
+const TABS: TabDef<TabId>[] = [
+  { id: "overview", label: "Overview" },
+  { id: "fixtures", label: "Fixtures" },
+  { id: "results", label: "Results" },
+  { id: "squad", label: "Squad" },
+  { id: "stats", label: "Statistics" },
+]
+
+interface Loaded {
+  team: TeamDetail
+  fixtures: MatchSummary[]
+  results: MatchSummary[]
+  form: { overall: TeamFormOut | null; home: TeamFormOut | null; away: TeamFormOut | null }
+  squad: PlayerOut[] | null
+  statistics: TeamStatisticsOut | null
+  capabilities: Capabilities | null
+}
+
+async function optional<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise
+  } catch {
+    return null
+  }
+}
 
 export default function TeamScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const { user } = useAuth()
-  const [team, setTeam] = useState<TeamOut | null>(null)
-  const [fixtures, setFixtures] = useState<MatchSummary[]>([])
-  const [results, setResults] = useState<MatchSummary[]>([])
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [initialFollowed, setInitialFollowed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [tab, setTab] = useState<TabId>("overview")
 
   const load = useCallback(async () => {
     setError(null)
     try {
       const teamId = Number(id)
-      const [teamData, fixturesPage, resultsPage, favourites] = await Promise.all([
-        api.getTeam(teamId),
+      const team = await api.getTeam(teamId)
+      const [fixtures, results, overall, home, away, squad, statistics, capabilities, favourites] = await Promise.all([
         api.getTeamFixtures(teamId),
-        api.getTeamResults(teamId),
+        api.getTeamResults(teamId, 1, 20),
+        optional(api.getTeamForm(teamId, "overall")),
+        optional(api.getTeamForm(teamId, "home")),
+        optional(api.getTeamForm(teamId, "away")),
+        optional(api.getTeamSquad(teamId)),
+        optional(api.getTeamStatistics(teamId)),
+        optional(api.getCapabilities()),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
       ])
-      setTeam(teamData)
-      setFixtures(fixturesPage.items)
-      setResults(resultsPage.items)
+      setLoaded({
+        team,
+        fixtures: fixtures.items,
+        results: results.items,
+        form: { overall, home, away },
+        squad,
+        statistics,
+        capabilities,
+      })
       setInitialFollowed(favourites?.teams.some((f) => f.team.id === teamId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Team not found." : "Unable to load this team.")
@@ -48,6 +96,132 @@ export default function TeamScreen() {
     return () => clearTimeout(handle)
   }, [load])
 
+  const rows = useMemo<{ key: string; node: ReactNode }[]>(() => {
+    if (!loaded) return []
+    const { team, fixtures, results, form, squad, statistics, capabilities } = loaded
+    const out: { key: string; node: ReactNode }[] = []
+    if (tab === "overview") {
+      out.push({
+        key: "form",
+        node: (
+          <Card>
+            <SectionTitle>Form</SectionTitle>
+            <View style={{ gap: 14 }}>
+              {form.overall && <FormStrip form={form.overall} title="Overall" />}
+              {form.home && <FormStrip form={form.home} title="Home" />}
+              {form.away && <FormStrip form={form.away} title="Away" />}
+            </View>
+            <Text style={[styles.faint, { marginTop: 10 }]}>Historical results, not a prediction.</Text>
+          </Card>
+        ),
+      })
+      if (team.venue) {
+        out.push({
+          key: "venue",
+          node: (
+            <Card>
+              <Text style={styles.faint}>Stadium</Text>
+              <Text style={styles.body}>{team.venue}</Text>
+            </Card>
+          ),
+        })
+      }
+      if (team.competitions.length > 0) {
+        out.push({
+          key: "competitions",
+          node: (
+            <Card>
+              <SectionTitle>Competitions</SectionTitle>
+              <View style={styles.chips}>
+                {team.competitions.map((c) => (
+                  <Link key={c.id} href={{ pathname: "/competition/[id]", params: { id: String(c.id) } }} asChild>
+                    <Pressable style={styles.chip} accessibilityRole="link">
+                      <Text style={styles.chipText}>{c.name}</Text>
+                    </Pressable>
+                  </Link>
+                ))}
+              </View>
+            </Card>
+          ),
+        })
+      }
+      if (fixtures[0]) {
+        out.push({
+          key: "next",
+          node: (
+            <Card>
+              <SectionTitle>Next match</SectionTitle>
+              <MatchCard match={fixtures[0]} />
+            </Card>
+          ),
+        })
+      }
+    } else if (tab === "fixtures" || tab === "results") {
+      const list = tab === "fixtures" ? fixtures : results
+      if (list.length === 0) {
+        out.push({
+          key: "empty",
+          node: <EmptyState message={tab === "fixtures" ? "No upcoming fixtures." : "No recent results."} />,
+        })
+      }
+      for (const m of list) out.push({ key: `m-${m.id}`, node: <MatchCard match={m} /> })
+    } else if (tab === "squad") {
+      if (!squad || squad.length === 0) {
+        out.push({
+          key: "no-squad",
+          node: (
+            <FeatureState
+              feature="team_squads"
+              capabilities={capabilities}
+              pendingMessage="The squad is still being loaded. Pull to refresh in a moment."
+            />
+          ),
+        })
+      }
+      for (const p of squad ?? []) out.push({ key: `p-${p.id}`, node: <SquadRow player={p} /> })
+    } else if (statistics && statistics.seasons.length > 0) {
+      for (const s of statistics.seasons) {
+        out.push({
+          key: `s-${s.competition_id}-${s.season}-${s.group}`,
+          node: (
+            <Card>
+              <View style={styles.statHeader}>
+                <Text style={styles.statTitle}>
+                  {s.competition_name}
+                  {s.group ? ` · ${s.group}` : ""}
+                </Text>
+                <Text style={styles.faint}>Season {s.season}</Text>
+              </View>
+              <View style={styles.statGrid}>
+                {(
+                  [
+                    ["Pos", s.position],
+                    ["P", s.played],
+                    ["W", s.won],
+                    ["D", s.drawn],
+                    ["L", s.lost],
+                    ["Pts", s.points],
+                    ["GF", s.goals_for],
+                    ["GA", s.goals_against],
+                    ["GD", s.goal_difference > 0 ? `+${s.goal_difference}` : s.goal_difference],
+                  ] as [string, string | number][]
+                ).map(([label, value]) => (
+                  <View key={label} style={styles.statCell} accessible accessibilityLabel={`${label}: ${value}`}>
+                    <Text style={styles.statValue}>{value}</Text>
+                    <Text style={styles.faint}>{label}</Text>
+                  </View>
+                ))}
+              </View>
+            </Card>
+          ),
+        })
+      }
+    } else {
+      out.push({ key: "no-stats", node: <EmptyState message="No season statistics are available for this team yet." /> })
+    }
+    return out
+  }, [loaded, tab])
+
   if (loading) {
     return (
       <View style={styles.screen}>
@@ -56,7 +230,7 @@ export default function TeamScreen() {
     )
   }
 
-  if (error || !team) {
+  if (error || !loaded) {
     return (
       <View style={styles.screen}>
         <ErrorState message={error ?? "Unable to load this team."} onRetry={load} />
@@ -64,81 +238,60 @@ export default function TeamScreen() {
     )
   }
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+  const { team } = loaded
+  const header = (
+    <View style={{ gap: 12, marginBottom: 12 }}>
       <View style={styles.headerCard}>
         <TeamBadge name={team.name} shortName={team.short_name} logoUrl={team.logo_url} size={44} />
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>{team.name}</Text>
+          <Text style={styles.headerTitle} accessibilityRole="header">
+            {team.name}
+          </Text>
           {team.country && <Text style={styles.headerSubtitle}>{team.country}</Text>}
         </View>
         <FavouriteButton kind="team" id={team.id} initialFollowed={initialFollowed} />
       </View>
+      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+    </View>
+  )
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Upcoming Fixtures</Text>
-        {fixtures.length === 0 ? (
-          <EmptyState message="No upcoming fixtures." />
-        ) : (
-          fixtures.map((match) => <MatchCard key={match.id} match={match} />)
-        )}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Recent Results</Text>
-        {results.length === 0 ? (
-          <EmptyState message="No recent results." />
-        ) : (
-          results.map((match) => <MatchCard key={match.id} match={match} />)
-        )}
-      </View>
-    </ScrollView>
+  return (
+    <FlatList
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      data={rows}
+      keyExtractor={(row) => row.key}
+      renderItem={({ item }) => <View style={{ marginBottom: tab === "overview" || tab === "stats" ? 12 : 0 }}>{item.node}</View>}
+      ListHeaderComponent={header}
+      initialNumToRender={12}
+      windowSize={7}
+    />
   )
 }
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: theme.background,
-  },
-  content: {
-    padding: 16,
-    gap: 12,
-  },
+  screen: { flex: 1, backgroundColor: theme.background },
+  content: { padding: 16, paddingBottom: 48 },
   headerCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 14,
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.border,
     backgroundColor: theme.card,
     padding: 16,
-    marginBottom: 12,
   },
-  headerTitle: {
-    color: theme.text,
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  headerSubtitle: {
-    color: theme.textFaint,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  card: {
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.border,
-    backgroundColor: theme.card,
-    padding: 12,
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: "700",
-    marginBottom: 8,
-    paddingHorizontal: 4,
-  },
+  headerTitle: { color: theme.text, fontSize: 18, fontWeight: "800" },
+  headerSubtitle: { color: theme.textFaint, fontSize: 12, marginTop: 2 },
+  faint: { color: theme.textFaint, fontSize: 11 },
+  body: { color: theme.text, fontSize: 14, marginTop: 2 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: { minHeight: 40, justifyContent: "center", paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.07)" },
+  chipText: { color: theme.text, fontSize: 13 },
+  statHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 },
+  statTitle: { color: theme.text, fontSize: 14, fontWeight: "700", flex: 1 },
+  statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  statCell: { width: "30%", alignItems: "center", paddingVertical: 8, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.05)" },
+  statValue: { color: theme.text, fontSize: 16, fontWeight: "800" },
 })

@@ -4,7 +4,7 @@ import hashlib
 import logging
 from datetime import datetime, time, timedelta, timezone
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,11 +22,12 @@ from app.schemas.match import MatchDetail, MatchEventOut, MatchSummary
 from app.schemas.player import PlayerOut
 from app.schemas.search import SearchResults
 from app.schemas.standing import StandingEntry
-from app.schemas.team import TeamOut
+from app.schemas.team import TeamDetail, TeamOut
 from app.services.cache import CacheAside
 from app.services.pagination import paginate
 from app.services.providers.base import FootballDataProvider
 from app.services.providers.schemas import ProviderMatch, ProviderMatchEvent
+from app.services.season import current_season_label
 from app.services.upsert import upsert_by_provider_id, upsert_by_unique_fields
 
 logger = logging.getLogger(__name__)
@@ -95,12 +96,27 @@ class FootballService:
         self.db = db
         self.provider = provider
         self.cache = cache
+        # (kind, provider_id) -> (values last written, row). A bulk sync
+        # mentions the same team/competition/player in dozens of payloads
+        # with identical values; re-upserting each time was the dominant
+        # cost of seeding. Scoped to this instance (one DB session / one
+        # sync run) and only consulted when the incoming values are
+        # unchanged, so it can never hide an update.
+        self._synced: dict[tuple[str, str], tuple[dict, object]] = {}
+
+    async def _upsert_memoized(self, kind: str, model, provider_id: str, values: dict):
+        memo = self._synced.get((kind, provider_id))
+        if memo is not None and memo[0] == values:
+            return memo[1]
+        obj = await upsert_by_provider_id(self.db, model, provider_id, values)
+        self._synced[(kind, provider_id)] = (dict(values), obj)
+        return obj
 
     # -- syncing (provider -> database) --------------------------------------
 
     async def _sync_competition(self, provider_competition) -> Competition:
-        return await upsert_by_provider_id(
-            self.db,
+        return await self._upsert_memoized(
+            "competition",
             Competition,
             provider_competition.provider_id,
             {
@@ -112,30 +128,36 @@ class FootballService:
         )
 
     async def _sync_team(self, provider_team) -> Team:
-        return await upsert_by_provider_id(
-            self.db,
-            Team,
-            provider_team.provider_id,
-            {
-                "name": provider_team.name,
-                "short_name": provider_team.short_name,
-                "country": provider_team.country,
-                "logo_url": provider_team.logo_url,
-            },
-        )
+        values = {
+            "name": provider_team.name,
+            "short_name": provider_team.short_name,
+            "country": provider_team.country,
+            "logo_url": provider_team.logo_url,
+        }
+        # Enrichment-only fields: a match payload's embedded team has no
+        # venue, and must not erase one a team-level sync already stored.
+        if provider_team.venue is not None:
+            values["venue"] = provider_team.venue
+        return await self._upsert_memoized("team", Team, provider_team.provider_id, values)
 
-    async def _sync_player(self, provider_player, team_id: int | None) -> Player:
-        return await upsert_by_provider_id(
-            self.db,
-            Player,
-            provider_player.provider_id,
-            {
-                "name": provider_player.name,
-                "position": provider_player.position,
-                "photo_url": provider_player.photo_url,
-                "team_id": team_id,
-            },
-        )
+    async def _sync_player(self, provider_player, team_id: int | None, *, profile: bool = False) -> Player:
+        """`profile=True` marks the row as populated by a squad/profile call
+        (see `Player.profile_synced_at`). Optional attributes are only
+        written when the payload actually carries them, so a thin payload
+        (a match event, a search hit) never wipes out a richer one."""
+        values: dict = {"name": provider_player.name}
+        for field in ("position", "photo_url", "nationality", "shirt_number"):
+            value = getattr(provider_player, field)
+            if value is not None:
+                values[field] = value
+        if team_id is None and provider_player.team is not None:
+            team_id = (await self._sync_team(provider_player.team)).id
+        if team_id is not None:
+            values["team_id"] = team_id
+        if profile:
+            values["profile_synced_at"] = datetime.now(timezone.utc)
+            return await upsert_by_provider_id(self.db, Player, provider_player.provider_id, values)
+        return await self._upsert_memoized("player", Player, provider_player.provider_id, values)
 
     async def sync_match(self, provider_match: ProviderMatch, *, with_events: bool = False) -> Match:
         """Upsert one match (and its competition/teams/events) from a
@@ -190,6 +212,15 @@ class FootballService:
                 if provider_event.assist_player
                 else None
             )
+            try:
+                event_type = MatchEventType(provider_event.event_type)
+            except ValueError:
+                logger.warning(
+                    "Skipping match event with unsupported type %r on match %s",
+                    provider_event.event_type,
+                    provider_match.provider_id,
+                )
+                continue
             event_key = provider_event.provider_id or _synthetic_event_key(
                 provider_match.provider_id, provider_event, index
             )
@@ -199,13 +230,14 @@ class FootballService:
                 MatchEvent,
                 {"match_id": match.id, "provider_id": event_key},
                 {
-                    "event_type": MatchEventType(provider_event.event_type),
+                    "event_type": event_type,
                     "minute": provider_event.minute,
                     "extra_minute": provider_event.extra_minute,
                     "team_id": team.id if team else None,
                     "player_id": player.id if player else None,
                     "assist_player_id": assist.id if assist else None,
                     "description": provider_event.description,
+                    "event_detail": provider_event.event_detail,
                 },
             )
 
@@ -225,12 +257,18 @@ class FootballService:
         fetched live on every request (see `get_standings` below) -- the
         worker calls this alongside fixture syncing."""
         provider_rows = await self.provider.get_standings(competition.provider_id)
+        default_season = current_season_label()
         for row in provider_rows:
             team = await self._sync_team(row.team)
             await upsert_by_unique_fields(
                 self.db,
                 Standing,
-                {"competition_id": competition.id, "team_id": team.id},
+                {
+                    "competition_id": competition.id,
+                    "season": row.season or default_season,
+                    "group_name": row.group or "",
+                    "team_id": team.id,
+                },
                 {
                     "position": row.position,
                     "played": row.played,
@@ -240,6 +278,8 @@ class FootballService:
                     "goals_for": row.goals_for,
                     "goals_against": row.goals_against,
                     "points": row.points,
+                    "description": row.description,
+                    "form": row.form,
                 },
             )
 
@@ -254,6 +294,10 @@ class FootballService:
             for provider_match in fixtures:
                 await self.sync_match(provider_match, with_events=True)
             await self.sync_standings(competition)
+            if self.provider.capabilities.top_scorers:
+                from app.services.team_player_service import TeamPlayerService
+
+                await TeamPlayerService(self.db, self.provider, self).sync_top_scorers(competition)
         await self.db.commit()
 
     # -- reads (database/cache -> API schemas) -------------------------------
@@ -263,12 +307,12 @@ class FootballService:
         stmt = select(Match).where(Match.id == match_id).options(*options)
         return (await self.db.execute(stmt)).scalar_one_or_none()
 
-    async def _query_matches(self, *conditions) -> list[MatchSummary]:
+    async def _query_matches(self, *conditions, descending: bool = False) -> list[MatchSummary]:
         stmt = (
             select(Match)
             .where(*conditions)
             .options(*_MATCH_LOAD_OPTIONS)
-            .order_by(Match.kickoff_time)
+            .order_by(Match.kickoff_time.desc() if descending else Match.kickoff_time)
         )
         matches = (await self.db.execute(stmt)).scalars().all()
         return [MatchSummary.model_validate(m) for m in matches]
@@ -367,8 +411,11 @@ class FootballService:
         return CompetitionOut.model_validate(competition)
 
     async def get_competition_fixtures(
-        self, competition_id: int, page: int, page_size: int
+        self, competition_id: int, page: int, page_size: int, *, scope: str = "all"
     ) -> tuple[list[MatchSummary], int]:
+        """`scope`: "all" (every stored match, oldest first -- the Phase 1
+        behaviour), "upcoming" (scheduled/live/halftime, soonest first) or
+        "results" (finished, most recent first)."""
         competition = await self._get_competition_by_id(competition_id)
 
         async def _load() -> list[MatchSummary]:
@@ -381,27 +428,48 @@ class FootballService:
             summaries = await self.cache.get_or_set_list(
                 key, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
             )
+        if scope == "upcoming":
+            summaries = [m for m in summaries if m.status in ("scheduled", "live", "halftime")]
+        elif scope == "results":
+            summaries = [m for m in reversed(summaries) if m.status == "finished"]
         return paginate(summaries, page, page_size)
 
-    async def get_standings(self, competition_id: int) -> list[StandingEntry]:
+    async def _latest_season(self, competition_id: int) -> str | None:
+        stmt = select(func.max(Standing.season)).where(Standing.competition_id == competition_id)
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def get_standings(
+        self, competition_id: int, season: str | None = None, group: str | None = None
+    ) -> list[StandingEntry]:
+        """The table for `season` (default: the latest stored one), ordered
+        by group then position. `group` narrows a group-stage competition
+        to one group; it is applied after the cache read so all groups of a
+        season share one cache entry."""
         competition = await self._get_competition_by_id(competition_id)
 
         async def _load() -> list[StandingEntry]:
+            resolved = season or await self._latest_season(competition.id)
+            if resolved is None:
+                return []
             stmt = (
                 select(Standing)
-                .where(Standing.competition_id == competition.id)
+                .where(Standing.competition_id == competition.id, Standing.season == resolved)
                 .options(selectinload(Standing.team))
-                .order_by(Standing.position)
+                .order_by(Standing.group_name, Standing.position)
             )
             rows = (await self.db.execute(stmt)).scalars().all()
             return [StandingEntry.model_validate(row) for row in rows]
 
         if self.cache is None:
-            return await _load()
-        key = RedisKeys.competition_standings(competition_id)
-        return await self.cache.get_or_set_list(
-            key, StandingEntry, _load, ttl_seconds=settings.redis_default_ttl_seconds
-        )
+            entries = await _load()
+        else:
+            key = RedisKeys.competition_standings(competition_id, season)
+            entries = await self.cache.get_or_set_list(
+                key, StandingEntry, _load, ttl_seconds=settings.redis_default_ttl_seconds
+            )
+        if group is not None:
+            entries = [e for e in entries if e.group_name == group]
+        return entries
 
     # -- teams ------------------------------------------------------------
 
@@ -412,9 +480,26 @@ class FootballService:
             raise NotFoundError(f"Team {team_id} not found")
         return team
 
-    async def get_team(self, team_id: int) -> TeamOut:
-        team = await self._get_team_by_id(team_id)
-        return TeamOut.model_validate(team)
+    async def get_team(self, team_id: int) -> TeamDetail:
+        async def _load() -> TeamDetail:
+            team = await self._get_team_by_id(team_id)  # only on a cache miss; also the 404
+            stmt = (
+                select(Competition)
+                .join(Standing, Standing.competition_id == Competition.id)
+                .where(Standing.team_id == team.id)
+                .distinct()
+                .order_by(Competition.name)
+            )
+            competitions = (await self.db.execute(stmt)).scalars().all()
+            detail = TeamDetail.model_validate(team)
+            detail.competitions = [CompetitionOut.model_validate(c) for c in competitions]
+            return detail
+
+        if self.cache is None:
+            return await _load()
+        return await self.cache.get_or_set_model(
+            RedisKeys.team(team_id), TeamDetail, _load, ttl_seconds=settings.redis_default_ttl_seconds
+        )
 
     async def get_team_fixtures(
         self, team_id: int, page: int, page_size: int, *, upcoming_only: bool = False
@@ -432,8 +517,11 @@ class FootballService:
                 key, MatchSummary, _load, ttl_seconds=settings.redis_default_ttl_seconds
             )
 
-        status_filter = "scheduled" if upcoming_only else "finished"
-        filtered = [m for m in all_matches if m.status == status_filter]
+        if upcoming_only:
+            filtered = [m for m in all_matches if m.status == "scheduled"]
+        else:
+            # Results read newest-first (the cached list is oldest-first).
+            filtered = [m for m in reversed(all_matches) if m.status == "finished"]
         return paginate(filtered, page, page_size)
 
     # -- search -------------------------------------------------------------
@@ -447,6 +535,12 @@ class FootballService:
         if not query:
             return SearchResults()
 
+        local = await self._search_database(query)
+        if local.teams or local.competitions or local.players or local.matches:
+            return local
+
+        # Nothing stored matches: ask the provider (it may know entities
+        # the background syncs haven't reached yet).
         results = await self.provider.search(query)
 
         teams = [await self._sync_team(t) for t in results.teams]
@@ -458,4 +552,53 @@ class FootballService:
             teams=[TeamOut.model_validate(t) for t in teams],
             competitions=[CompetitionOut.model_validate(c) for c in competitions],
             players=[PlayerOut.model_validate(p) for p in players],
+        )
+
+    async def _search_database(self, query: str, limit: int = 10) -> SearchResults:
+        """Phase 4 §24: search what is already stored, using the trigram
+        indexes on the name columns (`ILIKE '%q%'` is index-assisted for
+        3+ character queries) and the team-id indexes for matches -- every
+        query is LIMITed, nothing scans a table unbounded."""
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+
+        teams = (
+            (await self.db.execute(select(Team).where(Team.name.ilike(pattern, escape="\\")).order_by(Team.name).limit(limit)))
+            .scalars()
+            .all()
+        )
+        competitions = (
+            (
+                await self.db.execute(
+                    select(Competition).where(Competition.name.ilike(pattern, escape="\\")).order_by(Competition.name).limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        players = (
+            (await self.db.execute(select(Player).where(Player.name.ilike(pattern, escape="\\")).order_by(Player.name).limit(limit)))
+            .scalars()
+            .all()
+        )
+
+        matches: list[Match] = []
+        if teams:
+            ids = [t.id for t in teams]
+            stmt = (
+                select(Match)
+                .where(or_(Match.home_team_id.in_(ids), Match.away_team_id.in_(ids)))
+                .options(*_MATCH_LOAD_OPTIONS)
+                # Nearest to "now" first: live/imminent/just-finished matches
+                # before months-old history.
+                .order_by(func.abs(func.extract("epoch", Match.kickoff_time - func.now())))
+                .limit(limit)
+            )
+            matches = list((await self.db.execute(stmt)).scalars().all())
+
+        return SearchResults(
+            teams=[TeamOut.model_validate(t) for t in teams],
+            competitions=[CompetitionOut.model_validate(c) for c in competitions],
+            players=[PlayerOut.model_validate(p) for p in players],
+            matches=[MatchSummary.model_validate(m) for m in matches],
         )

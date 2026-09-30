@@ -35,7 +35,12 @@ async def test_competition_fixtures(seeded_client):
     resp = await seeded_client.get("/api/v1/competitions/2/fixtures")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total"] == 4  # epl-1..epl-4 in mock_data.py
+    # epl-1..epl-4 in mock_data.py, plus Phase 4's generated finished
+    # history (mock_extras.history_fixtures) that feeds form/head-to-head.
+    assert data["total"] >= 4
+    # The default scope ("all") is the Phase 1 behaviour: oldest first.
+    kickoffs = [m["kickoff_time"] for m in data["items"]]
+    assert kickoffs == sorted(kickoffs)
 
 
 async def test_competition_standings_are_ranked(seeded_client):

@@ -36,12 +36,72 @@ class RedisKeys:
         return f"football:competition:{competition_id}:fixtures:{on_date}"
 
     @staticmethod
-    def competition_standings(competition_id: int | str) -> str:
-        return f"football:competition:{competition_id}:standings"
+    def competition_standings(competition_id: int | str, season: str | None = None) -> str:
+        """`season=None` is the "current season" entry (latest stored
+        season) -- the one invalidated when a match finishes."""
+        base = f"football:competition:{competition_id}:standings"
+        return base if season is None else f"{base}:{season}"
+
+    @staticmethod
+    def competition_top_scorers(competition_id: int | str, season: str | None = None) -> str:
+        base = f"football:competition:{competition_id}:top-scorers"
+        return base if season is None else f"{base}:{season}"
 
     @staticmethod
     def team_fixtures(team_id: int | str) -> str:
         return f"football:team:{team_id}:fixtures"
+
+    # -- Phase 4: match centre / teams / players ---------------------------
+    @staticmethod
+    def match_lineups(match_id: int | str) -> str:
+        return f"football:match:{match_id}:lineups"
+
+    @staticmethod
+    def match_statistics(match_id: int | str) -> str:
+        return f"football:match:{match_id}:statistics"
+
+    @staticmethod
+    def match_player_statistics(match_id: int | str) -> str:
+        return f"football:match:{match_id}:players"
+
+    @staticmethod
+    def match_form(match_id: int | str) -> str:
+        return f"football:match:{match_id}:form"
+
+    @staticmethod
+    def match_head_to_head(match_id: int | str) -> str:
+        return f"football:match:{match_id}:h2h"
+
+    @staticmethod
+    def team(team_id: int | str) -> str:
+        return f"football:team:{team_id}"
+
+    @staticmethod
+    def team_form(team_id: int | str, scope: str = "overall") -> str:
+        return f"football:team:{team_id}:form:{scope}"
+
+    @staticmethod
+    def team_squad(team_id: int | str) -> str:
+        return f"football:team:{team_id}:squad"
+
+    @staticmethod
+    def team_statistics(team_id: int | str) -> str:
+        return f"football:team:{team_id}:statistics"
+
+    @staticmethod
+    def player(player_id: int | str) -> str:
+        return f"football:player:{player_id}"
+
+    @staticmethod
+    def player_statistics(player_id: int | str) -> str:
+        return f"football:player:{player_id}:statistics"
+
+    @staticmethod
+    def sync_requested(kind: str, identifier: int | str) -> str:
+        """Debounce marker so read endpoints that enqueue a background
+        sync (an empty squad, an unenriched player) enqueue it once per
+        window, not once per request."""
+        return f"football:sync-requested:{kind}:{identifier}"
 
     # -- rate limiting (Phase 3 §21) ---------------------------------------
     @staticmethod

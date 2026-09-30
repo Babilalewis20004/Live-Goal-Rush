@@ -4,6 +4,7 @@ import { AnimatedBackground } from "@/components/animated-background"
 import { CompetitionCard } from "@/components/competition-card"
 import { SearchBar } from "@/components/search-bar"
 import { TeamBadge } from "@/components/team-badge"
+import { MatchCard } from "@/components/match-card"
 import { EmptyState } from "@/components/ui/empty-state"
 import { api } from "@/lib/api"
 
@@ -19,7 +20,10 @@ export default async function SearchPage({
   const results = hasQuery ? await api.search(q) : null
   const hasResults =
     results !== null &&
-    (results.teams.length > 0 || results.competitions.length > 0 || results.players.length > 0)
+    (results.teams.length > 0 ||
+      results.competitions.length > 0 ||
+      results.players.length > 0 ||
+      results.matches.length > 0)
 
   return (
     <main className="relative min-h-screen text-white">
@@ -36,7 +40,7 @@ export default async function SearchPage({
         </Suspense>
 
         <div className="mt-4 space-y-6">
-          {!hasQuery && <EmptyState message="Search for teams, competitions or players." />}
+          {!hasQuery && <EmptyState message="Search for teams, players, competitions or matches." />}
           {hasQuery && !hasResults && <EmptyState message={`No results for "${q}".`} />}
 
           {results && results.teams.length > 0 && (
@@ -73,13 +77,25 @@ export default async function SearchPage({
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/40">Players</h2>
               <div className="space-y-2">
                 {results.players.map((player) => (
-                  <div
+                  <Link
                     key={player.id}
-                    className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3"
+                    href={`/player/${player.id}`}
+                    className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 transition-colors hover:bg-white/[0.06]"
                   >
                     <span className="text-sm text-white">{player.name}</span>
                     {player.position && <span className="text-xs text-white/40">{player.position}</span>}
-                  </div>
+                  </Link>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {results && results.matches.length > 0 && (
+            <section>
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/40">Matches</h2>
+              <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
+                {results.matches.map((match) => (
+                  <MatchCard key={match.id} match={match} />
                 ))}
               </div>
             </section>

@@ -16,7 +16,12 @@ unversioned, outside `/api/v1` (see `deployment/docker.md` and
 | `GET /api/v1/matches/today`             | All of today's fixtures, any status               |
 | `GET /api/v1/matches/upcoming`          | Scheduled matches with a future kickoff (looks up to 7 days ahead) |
 | `GET /api/v1/matches/{match_id}`        | Full match detail, including the event timeline   |
-| `GET /api/v1/matches/{match_id}/events` | Just the event timeline for a match               |
+| `GET /api/v1/matches/{match_id}/events` | Just the event timeline for a match (ordered `minute`, `extra_minute`, `id`) |
+| `GET /api/v1/matches/{match_id}/lineups`     | *(Phase 4)* Both teams' lineups: formation, starting XI, substitutes (with subbed in/out minutes) |
+| `GET /api/v1/matches/{match_id}/statistics`  | *(Phase 4)* Team statistics; a `null` field = not supplied by the provider |
+| `GET /api/v1/matches/{match_id}/players`     | *(Phase 4)* Per-player match statistics            |
+| `GET /api/v1/matches/{match_id}/form`        | *(Phase 4)* Both teams' last 5 results before this match (`scope=overall\|venue`) |
+| `GET /api/v1/matches/{match_id}/head-to-head` | *(Phase 4)* Last ≤5 finished meetings inside an explicit window |
 
 ### Competitions
 
@@ -24,22 +29,41 @@ unversioned, outside `/api/v1` (see `deployment/docker.md` and
 | ------------------------------------------------------ | -------------------------------------- |
 | `GET /api/v1/competitions`                              | Paginated list of all competitions    |
 | `GET /api/v1/competitions/{competition_id}`             | Single competition                    |
-| `GET /api/v1/competitions/{competition_id}/fixtures`    | Paginated fixtures for that competition |
-| `GET /api/v1/competitions/{competition_id}/standings`   | Ranked standings table                |
+| `GET /api/v1/competitions/{competition_id}/fixtures`    | Paginated matches; `?scope=all` (default) \| `upcoming` \| `results` (newest first) |
+| `GET /api/v1/competitions/{competition_id}/standings`   | Ranked table; *(Phase 4)* `?season=&group=`, rows carry season/group/description/form/goal difference |
+| `GET /api/v1/competitions/{competition_id}/top-scorers` | *(Phase 4)* Ranked scorers for a competition + season (`?season=`) |
 
 ### Teams
 
 | Method & path                              | Description                              |
 | --------------------------------------------- | ------------------------------------------ |
-| `GET /api/v1/teams/{team_id}`                 | Single team                                |
+| `GET /api/v1/teams/{team_id}`                 | Single team (*Phase 4:* + `venue`, `competitions`) |
 | `GET /api/v1/teams/{team_id}/fixtures`        | Paginated upcoming (`scheduled`) fixtures  |
-| `GET /api/v1/teams/{team_id}/results`         | Paginated `finished` results               |
+| `GET /api/v1/teams/{team_id}/results`         | Paginated `finished` results (newest first) |
+| `GET /api/v1/teams/{team_id}/players`         | *(Phase 4)* Squad                          |
+| `GET /api/v1/teams/{team_id}/statistics`      | *(Phase 4)* Per competition+season table figures |
+| `GET /api/v1/teams/{team_id}/form`            | *(Phase 4)* Last 5 results (`scope=overall\|home\|away`) |
+
+### Players *(Phase 4)*
+
+| Method & path                                   | Description                                   |
+| ------------------------------------------------- | ----------------------------------------------- |
+| `GET /api/v1/players/{player_id}`                 | Profile (name, position, nationality, shirt number, team) |
+| `GET /api/v1/players/{player_id}/statistics`      | Season totals per competition + last 10 appearances |
+
+### Capabilities *(Phase 4)*
+
+| Method & path                | Description                                       |
+| ------------------------------ | --------------------------------------------------- |
+| `GET /api/v1/capabilities`     | What the active data provider supplies (lineups, statistics, squads, ...) so clients can show an honest "not available" state |
 
 ### Search
 
 | Method & path                | Description                                       |
 | ------------------------------ | --------------------------------------------------- |
-| `GET /api/v1/search?q=...`     | Teams, competitions and players matching the query. Empty/missing `q` returns empty lists (200), not an error. |
+| `GET /api/v1/search?q=...`     | Teams, competitions, players and (Phase 4) matches matching the query — database-first with trigram indexes, every query bounded. Empty/missing `q` returns empty lists (200), not an error. |
+
+The full Phase 4 contract and rationale are in `match-centre.md`.
 
 ## Response shapes
 

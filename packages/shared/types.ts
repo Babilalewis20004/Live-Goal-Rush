@@ -42,6 +42,8 @@ export interface PlayerOut {
   name: string
   position: string | null
   photo_url: string | null
+  nationality?: string | null
+  shirt_number?: number | null
 }
 
 export type DataStatus = "FRESH" | "STALE" | "UNAVAILABLE"
@@ -74,6 +76,8 @@ export interface MatchEventOut {
   player: PlayerOut | null
   assist_player: PlayerOut | null
   description: string | null
+  /** Provider-supplied qualifier (e.g. "Header"); free text, may be absent. */
+  event_detail?: string | null
 }
 
 export interface MatchDetail extends MatchSummary {
@@ -90,12 +94,22 @@ export interface StandingEntry {
   goals_for: number
   goals_against: number
   points: number
+  goal_difference: number
+  /** "" when the provider didn't state a season. */
+  season: string
+  /** Group label for group stages; "" for a single table. */
+  group_name: string
+  /** Provider-supplied classification (qualification, relegation...). */
+  description: string | null
+  /** Provider-supplied recent form, e.g. "WWDLW". */
+  form: string | null
 }
 
 export interface SearchResults {
   teams: TeamOut[]
   competitions: CompetitionOut[]
   players: PlayerOut[]
+  matches: MatchSummary[]
 }
 
 export interface Page<T> {
@@ -118,14 +132,20 @@ export type RealtimeEventType =
   | "MATCH_FINISHED"
   | "MATCH_POSTPONED"
   | "MATCH_CANCELLED"
+  | "LINEUP_UPDATED"
+  | "STATISTICS_UPDATED"
 
 export interface RealtimeMatchEvent {
   id: number
   event_type: string
   minute: number
+  extra_minute?: number | null
   team_id: number | null
   player: string | null
+  /** Substitutions: the player going OFF (`player` is who came on). */
+  assist?: string | null
   description: string | null
+  event_detail?: string | null
 }
 
 /** The `match` payload of a WebSocket message -- deliberately not a full
@@ -138,6 +158,8 @@ export interface RealtimeMatchPayload {
   status: MatchStatus
   minute: number | null
   event?: RealtimeMatchEvent
+  /** Present on STATISTICS_UPDATED. */
+  statistics?: MatchStatisticsOut
 }
 
 export interface RealtimeMessage {
@@ -217,4 +239,216 @@ export interface NotificationPreferenceOut {
   scope_id: number | null
   event_type: RealtimeEventType
   enabled: boolean
+}
+
+// -- Phase 4: match centre, teams, players, competitions --
+// (mirrors apps/api/app/schemas/{lineup,statistics,form,standing,player,team,capabilities}.py)
+
+/** What the active data provider can supply (`GET /api/v1/capabilities`).
+ * `false` means "this provider never supplies it" -- distinct from "it
+ * exists but hasn't been published yet" (an empty payload). */
+export interface Capabilities {
+  match_events: boolean
+  lineups: boolean
+  match_statistics: boolean
+  player_statistics: boolean
+  team_squads: boolean
+  player_profiles: boolean
+  standings: boolean
+  top_scorers: boolean
+  venues: boolean
+  head_to_head: boolean
+  form: boolean
+}
+
+export interface TeamDetail extends TeamOut {
+  venue: string | null
+  competitions: CompetitionOut[]
+}
+
+export interface PlayerDetail extends PlayerOut {
+  team: TeamOut | null
+}
+
+export interface LineupPlayerOut {
+  player: PlayerOut
+  position: string | null
+  shirt_number: number | null
+  is_starter: boolean
+  subbed_in_minute: number | null
+  subbed_out_minute: number | null
+}
+
+export interface TeamLineupOut {
+  team: TeamOut
+  formation: string | null
+  starters: LineupPlayerOut[]
+  substitutes: LineupPlayerOut[]
+}
+
+/** Both null = lineups not supplied (yet, or ever -- see `Capabilities`). */
+export interface MatchLineupsOut {
+  home: TeamLineupOut | null
+  away: TeamLineupOut | null
+}
+
+/** A `null` field = not supplied by the provider. Never render it as 0. */
+export interface TeamMatchStatsOut {
+  team_id: number
+  possession: number | null
+  shots: number | null
+  shots_on_target: number | null
+  corners: number | null
+  fouls: number | null
+  offsides: number | null
+  yellow_cards: number | null
+  red_cards: number | null
+  pass_accuracy: number | null
+  expected_goals: number | null
+}
+
+export interface MatchStatisticsOut {
+  home: TeamMatchStatsOut | null
+  away: TeamMatchStatsOut | null
+}
+
+export interface PlayerMatchStatsOut {
+  player: PlayerOut
+  team_id: number
+  minutes_played: number | null
+  goals: number | null
+  assists: number | null
+  shots: number | null
+  shots_on_target: number | null
+  passes: number | null
+  pass_accuracy: number | null
+  key_passes: number | null
+  tackles: number | null
+  interceptions: number | null
+  clearances: number | null
+  blocks: number | null
+  yellow_cards: number | null
+  red_cards: number | null
+  fouls_committed: number | null
+}
+
+export interface MatchPlayerStatisticsOut {
+  players: PlayerMatchStatsOut[]
+}
+
+export interface PlayerSeasonStatsOut {
+  competition_id: number
+  competition_name: string
+  season: string
+  team_id: number | null
+  appearances: number | null
+  goals: number
+  assists: number | null
+  penalties: number | null
+}
+
+export interface PlayerAppearanceOut {
+  match: MatchSummary
+  stats: PlayerMatchStatsOut
+}
+
+export interface PlayerStatisticsOut {
+  seasons: PlayerSeasonStatsOut[]
+  recent_matches: PlayerAppearanceOut[]
+}
+
+export interface TeamSeasonStatsOut {
+  competition_id: number
+  competition_name: string
+  season: string
+  group: string
+  position: number
+  played: number
+  won: number
+  drawn: number
+  lost: number
+  goals_for: number
+  goals_against: number
+  goal_difference: number
+  points: number
+  form: string | null
+}
+
+export interface TeamStatisticsOut {
+  seasons: TeamSeasonStatsOut[]
+}
+
+export interface TeamRef {
+  id: number
+  name: string
+  short_name: string | null
+  logo_url: string | null
+}
+
+export interface TopScorerOut {
+  rank: number
+  player: PlayerOut
+  team: TeamRef | null
+  goals: number
+  assists: number | null
+  appearances: number | null
+  penalties: number | null
+}
+
+export interface TopScorersOut {
+  competition_id: number
+  season: string | null
+  scorers: TopScorerOut[]
+}
+
+export type FormResult = "W" | "D" | "L"
+
+export interface FormResultOut {
+  match_id: number
+  result: FormResult
+  venue: "home" | "away"
+  opponent: TeamOut
+  goals_for: number
+  goals_against: number
+  kickoff_time: string
+  competition: CompetitionOut
+}
+
+/** Historical results only -- not a prediction. `results` is most recent
+ * first; `sequence` is oldest -> newest (latest on the right). */
+export interface TeamFormOut {
+  team_id: number
+  scope: "overall" | "home" | "away"
+  limit: number
+  results: FormResultOut[]
+  sequence: string
+}
+
+export interface MatchFormOut {
+  home: TeamFormOut
+  away: TeamFormOut
+}
+
+export interface HeadToHeadMeetingOut {
+  match_id: number
+  kickoff_time: string
+  competition: CompetitionOut
+  home_team: TeamOut
+  away_team: TeamOut
+  home_score: number
+  away_score: number
+}
+
+/** Finished meetings in `period_start`..`before` (capped at `limit`),
+ * wins counted relative to the match's home/away teams. */
+export interface HeadToHeadOut {
+  home_team_id: number
+  away_team_id: number
+  limit: number
+  period_start: string
+  before: string
+  meetings: HeadToHeadMeetingOut[]
+  home_team_wins: number
+  draws: number
+  away_team_wins: number
 }

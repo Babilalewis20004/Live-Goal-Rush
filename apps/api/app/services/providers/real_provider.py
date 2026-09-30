@@ -18,6 +18,16 @@ To activate it:
 The free tier's competition/match coverage and rate limits are narrower
 than the mock dataset, so response mapping here is best-effort and may
 need adjusting to match the exact fields your plan returns.
+
+Phase 4 capability matrix for this provider (see `capabilities`): standings
+(with season, groups and the provider's form string), top scorers, team
+squads, player profiles and team venues are supported. Match events,
+lineups, match statistics and player match statistics are NOT available on
+the free tier, so they are declared unsupported and the app shows an honest
+"not available from this data provider" state instead of empty sections.
+Dates of birth are deliberately not stored (data minimization), and
+shirt numbers/qualification zones are not supplied by the API, so they stay
+empty rather than guessed.
 """
 
 from __future__ import annotations
@@ -28,11 +38,14 @@ import httpx
 
 from app.services.providers.base import FootballDataProvider
 from app.services.providers.schemas import (
+    ProviderCapabilities,
     ProviderCompetition,
     ProviderMatch,
+    ProviderPlayer,
     ProviderSearchResult,
     ProviderStandingRow,
     ProviderTeam,
+    ProviderTopScorer,
 )
 
 _STATUS_MAP = {
@@ -45,6 +58,40 @@ _STATUS_MAP = {
     "SUSPENDED": "postponed",
     "CANCELLED": "cancelled",
 }
+
+
+def _position(raw: str | None) -> str | None:
+    """Normalize football-data's position vocabulary ("Defence", "Centre-Back",
+    "Offence", "Left Winger"...) onto the four groups the app uses."""
+    if not raw:
+        return None
+    value = raw.lower()
+    if "keeper" in value:
+        return "Goalkeeper"
+    if "defen" in value or "back" in value:
+        return "Defender"
+    if "midfield" in value:
+        return "Midfielder"
+    if any(word in value for word in ("offen", "forward", "winger", "striker", "attack")):
+        return "Forward"
+    return raw
+
+
+def _season_label(season: dict | None) -> str | None:
+    """"2025/26" for a season spanning two calendar years, "2026" for one
+    that fits in a single year; `None` if the payload has no start date."""
+    if not season or not season.get("startDate"):
+        return None
+    start = int(season["startDate"][:4])
+    end = int(season["endDate"][:4]) if season.get("endDate") else start
+    return f"{start}/{str(end)[-2:]}" if end != start else str(start)
+
+
+def _form(raw: str | None) -> str | None:
+    """"W,D,L,W,W" -> "WDLWW"."""
+    if not raw:
+        return None
+    return raw.replace(",", "").replace(" ", "") or None
 
 
 class RealFootballDataProvider(FootballDataProvider):
@@ -68,6 +115,30 @@ class RealFootballDataProvider(FootballDataProvider):
             short_name=raw.get("shortName") or raw.get("tla"),
             country=raw.get("area", {}).get("name"),
             logo_url=raw.get("crest"),
+            venue=raw.get("venue"),
+        )
+
+    def _player(self, raw: dict, team: ProviderTeam | None = None) -> ProviderPlayer:
+        return ProviderPlayer(
+            provider_id=str(raw["id"]),
+            name=raw["name"],
+            position=_position(raw.get("position") or raw.get("section")),
+            nationality=raw.get("nationality"),
+            team=team,
+        )
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            match_events=False,
+            lineups=False,
+            match_statistics=False,
+            player_statistics=False,
+            team_squads=True,
+            player_profiles=True,
+            standings=True,
+            top_scorers=True,
+            venues=True,
         )
 
     def _competition(self, raw: dict) -> ProviderCompetition:
@@ -131,24 +202,69 @@ class RealFootballDataProvider(FootballDataProvider):
         resp = await self._client.get(f"/competitions/{competition_id}/standings")
         resp.raise_for_status()
         data = resp.json()
-        table = next(
-            (t["table"] for t in data.get("standings", []) if t.get("type") == "TOTAL"),
-            [],
-        )
-        return [
-            ProviderStandingRow(
-                team=self._team(row["team"]),
-                position=row["position"],
-                played=row["playedGames"],
-                won=row["won"],
-                drawn=row["draw"],
-                lost=row["lost"],
-                goals_for=row["goalsFor"],
-                goals_against=row["goalsAgainst"],
-                points=row["points"],
+        season = _season_label(data.get("season"))
+        rows: list[ProviderStandingRow] = []
+        # A league has one TOTAL table; a group stage has one per group.
+        for table in (t for t in data.get("standings", []) if t.get("type") == "TOTAL"):
+            group = table.get("group")
+            group_label = group.replace("_", " ").title() if group else None
+            for row in table.get("table", []):
+                rows.append(
+                    ProviderStandingRow(
+                        team=self._team(row["team"]),
+                        season=season,
+                        group=group_label,
+                        form=_form(row.get("form")),
+                        position=row["position"],
+                        played=row["playedGames"],
+                        won=row["won"],
+                        drawn=row["draw"],
+                        lost=row["lost"],
+                        goals_for=row["goalsFor"],
+                        goals_against=row["goalsAgainst"],
+                        points=row["points"],
+                    )
+                )
+        return rows
+
+    async def get_top_scorers(self, competition_id: str) -> list[ProviderTopScorer]:
+        resp = await self._client.get(f"/competitions/{competition_id}/scorers")
+        resp.raise_for_status()
+        data = resp.json()
+        season = _season_label(data.get("season"))
+        scorers: list[ProviderTopScorer] = []
+        for row in data.get("scorers", []):
+            team = self._team(row["team"]) if row.get("team") else None
+            scorers.append(
+                ProviderTopScorer(
+                    player=self._player(row["player"], team),
+                    team=team,
+                    season=season,
+                    goals=row.get("goals") or 0,
+                    assists=row.get("assists"),
+                    appearances=row.get("playedMatches"),
+                    penalties=row.get("penalties"),
+                )
             )
-            for row in table
-        ]
+        return scorers
+
+    async def get_team_squad(self, team_id: str) -> list[ProviderPlayer]:
+        resp = await self._client.get(f"/teams/{team_id}")
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        data = resp.json()
+        team = self._team(data)
+        return [self._player(p, team) for p in data.get("squad", [])]
+
+    async def get_player(self, player_id: str) -> ProviderPlayer | None:
+        resp = await self._client.get(f"/persons/{player_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        current_team = data.get("currentTeam")
+        return self._player(data, self._team(current_team) if current_team else None)
 
     async def get_team(self, team_id: str) -> ProviderTeam | None:
         resp = await self._client.get(f"/teams/{team_id}")

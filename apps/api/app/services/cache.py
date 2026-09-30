@@ -46,8 +46,16 @@ class CacheAside:
             logger.warning("Redis SET failed for %s; continuing without caching it", key, exc_info=True)
 
     async def get_or_set_model(
-        self, key: str, model: type[T], loader: Callable[[], Awaitable[T]], *, ttl_seconds: int
+        self,
+        key: str,
+        model: type[T],
+        loader: Callable[[], Awaitable[T]],
+        *,
+        ttl_seconds: int | Callable[[], int],
     ) -> T:
+        """`ttl_seconds` may be a callable, evaluated *after* the loader ran:
+        for data whose freshness depends on something the loader looked up
+        (e.g. a match's status), so a cache hit never needs that lookup."""
         cached = await self._safe_get(key)
         if cached is not None:
             metrics.cache_hit()
@@ -55,7 +63,8 @@ class CacheAside:
 
         metrics.cache_miss()
         value = await loader()
-        await self._safe_set(key, value.model_dump(mode="json"), ttl_seconds=ttl_seconds)
+        ttl = ttl_seconds() if callable(ttl_seconds) else ttl_seconds
+        await self._safe_set(key, value.model_dump(mode="json"), ttl_seconds=ttl)
         return value
 
     async def get_or_set_list(

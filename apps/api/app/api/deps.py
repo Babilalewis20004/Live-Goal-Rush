@@ -11,14 +11,20 @@ from app.services.auth_service import AuthService
 from app.services.cache import CacheAside
 from app.services.favourites_service import FavouritesService
 from app.services.football_service import FootballService
+from app.services.form_service import FormService
+from app.services.match_centre_service import MatchCentreService
 from app.services.notification_preferences_service import (
     DevicesService,
     NotificationPreferencesService,
 )
 from app.services.providers import get_provider
 from app.services.providers.base import FootballDataProvider
+from app.services.team_player_service import TeamPlayerService
 
 RedisServiceDep = Annotated[RedisService, Depends(get_redis_service)]
+
+
+ProviderDep = Annotated[FootballDataProvider, Depends(get_provider)]
 
 
 def get_cache(redis: RedisServiceDep) -> CacheAside:
@@ -37,6 +43,38 @@ def get_football_service(
 
 
 FootballServiceDep = Annotated[FootballService, Depends(get_football_service)]
+
+
+def get_match_centre_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    provider: Annotated[FootballDataProvider, Depends(get_provider)],
+    cache: CacheDep,
+) -> MatchCentreService:
+    return MatchCentreService(db=db, provider=provider, cache=cache)
+
+
+MatchCentreServiceDep = Annotated[MatchCentreService, Depends(get_match_centre_service)]
+
+
+def get_team_player_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    provider: Annotated[FootballDataProvider, Depends(get_provider)],
+    cache: CacheDep,
+) -> TeamPlayerService:
+    return TeamPlayerService(db=db, provider=provider, cache=cache)
+
+
+TeamPlayerServiceDep = Annotated[TeamPlayerService, Depends(get_team_player_service)]
+
+
+def get_form_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    cache: CacheDep,
+) -> FormService:
+    return FormService(db=db, cache=cache)
+
+
+FormServiceDep = Annotated[FormService, Depends(get_form_service)]
 
 
 def pagination_params(

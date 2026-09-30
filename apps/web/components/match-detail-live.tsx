@@ -1,42 +1,79 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
-import { MapPin } from "lucide-react"
 import { FavouriteButton } from "@/components/favourite-button"
-import { LeagueLogo } from "@/components/league-logo"
-import { TeamBadge } from "@/components/team-badge"
-import { MatchEvent } from "@/components/match-event"
-import { EmptyState } from "@/components/ui/empty-state"
-import { LiveIndicator } from "@/components/ui/live-indicator"
 import { ConnectionBadge } from "@/components/ui/connection-badge"
+import { FeatureState } from "@/components/ui/feature-state"
+import { TabPanel, Tabs, type TabDef } from "@/components/ui/tabs"
+import { FormStrip } from "@/components/match-centre/form-strip"
+import { HeadToHead } from "@/components/match-centre/head-to-head"
+import { Lineups } from "@/components/match-centre/lineups"
+import { LiveAnnouncer, StaleBanner } from "@/components/match-centre/live-status"
+import { MatchHeader } from "@/components/match-centre/match-header"
+import { StandingsTable } from "@/components/match-centre/standings-table"
+import { Statistics, hasStatistics } from "@/components/match-centre/statistics"
+import { Timeline } from "@/components/match-centre/timeline"
 import { useMatchDetail } from "@/hooks/use-match-detail"
-import { formatKickoff, formatKickoffDate } from "@/lib/format"
-import type { MatchDetail as MatchDetailType } from "@/types/api"
+import type {
+  Capabilities,
+  HeadToHeadOut,
+  MatchDetail as MatchDetailType,
+  MatchFormOut,
+  MatchLineupsOut,
+  MatchStatisticsOut,
+  StandingEntry,
+} from "@/types/api"
 
-function statusLabel(status: string, minute: number | null): string {
-  if (status === "live") return `${minute}'`
-  if (status === "halftime") return "Half Time"
-  if (status === "finished") return "Full Time"
-  if (status === "postponed" || status === "cancelled") return status.toUpperCase()
-  return "Scheduled"
+type TabId = "overview" | "timeline" | "stats" | "lineups" | "table"
+
+const TABS: TabDef<TabId>[] = [
+  { id: "overview", label: "Overview" },
+  { id: "timeline", label: "Timeline" },
+  { id: "stats", label: "Stats" },
+  { id: "lineups", label: "Lineups" },
+  { id: "table", label: "Table" },
+]
+
+const ID_PREFIX = "match"
+
+/** Everything the server component loaded for first paint. Each piece other
+ * than `match` is nullable: one failing/unsupported resource degrades to an
+ * honest empty state for that tab instead of failing the whole page. */
+export interface MatchCentreData {
+  lineups: MatchLineupsOut | null
+  statistics: MatchStatisticsOut | null
+  form: MatchFormOut | null
+  headToHead: HeadToHeadOut | null
+  standings: StandingEntry[] | null
+  capabilities: Capabilities | null
 }
 
-/** Client half of the match detail page (spec §17): the server component
- * (`app/match/[id]/page.tsx`) does the initial REST fetch so the page
- * still renders real data on first load / with JS disabled; this
- * component takes over from there with `useMatchDetail`'s WebSocket feed. */
+/** Client half of the match centre. The server component
+ * (`app/match/[id]/page.tsx`) does the initial REST fetches so the page renders
+ * real data on first load / with JS disabled; this takes over with
+ * `useMatchDetail`'s single WebSocket feed. */
 export function MatchDetailLive({
   initialMatch,
   initialFollowed = false,
+  data,
 }: {
   initialMatch: MatchDetailType
   initialFollowed?: boolean
+  data: MatchCentreData
 }) {
-  const { match, connectionStatus } = useMatchDetail(initialMatch)
+  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings } = useMatchDetail(
+    initialMatch,
+    { lineups: data.lineups, statistics: data.statistics, standings: data.standings },
+    data.capabilities,
+  )
+  const [tab, setTab] = useState<TabId>("overview")
   const isLive = match.status === "live" || match.status === "halftime"
+  const notStarted = match.status === "scheduled" || match.status === "postponed" || match.status === "cancelled"
+  const { capabilities } = data
 
   return (
-    <div className="mx-auto max-w-2xl px-4 pb-16 pt-6">
+    <div className="mx-auto max-w-3xl px-4 pb-16 pt-6">
       <div className="flex items-center justify-between">
         <Link href="/" className="text-xs text-white/50 hover:text-white/80">
           ← Back to livescores
@@ -47,94 +84,104 @@ export function MatchDetailLive({
         </div>
       </div>
 
-      <div className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">
-        <div className="flex items-center justify-center gap-2 border-b border-white/[0.06] px-4 py-3">
-          <Link
-            href={`/competition/${match.competition.id}`}
-            className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-white/70 hover:text-white"
-          >
-            <LeagueLogo name={match.competition.name} logoUrl={match.competition.logo_url} size={18} />
-            {match.competition.name}
-          </Link>
-        </div>
-
-        <div className="flex items-center justify-between gap-3 px-6 py-8">
-          <Link
-            href={`/team/${match.home_team.id}`}
-            className="flex min-w-0 flex-1 flex-col items-center gap-2 text-center"
-          >
-            <TeamBadge
-              name={match.home_team.name}
-              shortName={match.home_team.short_name}
-              logoUrl={match.home_team.logo_url}
-              size={56}
-            />
-            <span className="truncate text-sm font-medium text-white/90">{match.home_team.name}</span>
-          </Link>
-
-          <div className="flex shrink-0 flex-col items-center gap-2 px-2">
-            <div className="flex items-center gap-3 text-4xl font-bold tabular-nums text-white">
-              <span>{match.home_score}</span>
-              <span className="text-white/30">-</span>
-              <span>{match.away_score}</span>
-            </div>
-            <span
-              className={[
-                "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold",
-                isLive ? "bg-emerald-500/15 text-emerald-400" : "text-white/50",
-              ].join(" ")}
-            >
-              {isLive && <LiveIndicator />}
-              {statusLabel(match.status, match.minute)}
-            </span>
-            {(match.half_time_home_score !== null || match.half_time_away_score !== null) && (
-              <span className="text-[11px] text-white/35">
-                HT {match.half_time_home_score ?? 0} - {match.half_time_away_score ?? 0}
-              </span>
-            )}
-          </div>
-
-          <Link
-            href={`/team/${match.away_team.id}`}
-            className="flex min-w-0 flex-1 flex-col items-center gap-2 text-center"
-          >
-            <TeamBadge
-              name={match.away_team.name}
-              shortName={match.away_team.short_name}
-              logoUrl={match.away_team.logo_url}
-              size={56}
-            />
-            <span className="truncate text-sm font-medium text-white/90">{match.away_team.name}</span>
-          </Link>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 border-t border-white/[0.06] px-4 py-2.5 text-[11px] text-white/40">
-          <span>
-            {formatKickoffDate(match.kickoff_time)} · {formatKickoff(match.kickoff_time)} UTC
-          </span>
-          {match.venue && (
-            <span className="flex items-center gap-1">
-              <MapPin className="h-3 w-3" />
-              {match.venue}
-            </span>
-          )}
-        </div>
+      <div className="mt-4">
+        <MatchHeader match={match} />
+        <LiveAnnouncer match={match} />
+        <StaleBanner status={connectionStatus} isLive={isLive} lastUpdatedAt={lastUpdatedAt} />
       </div>
 
-      <section className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">
-        <h2 className="border-b border-white/[0.06] px-4 py-3 text-sm font-semibold text-white">Match Events</h2>
-        <div className="px-4 py-4">
-          {match.events.length === 0 ? (
-            <EmptyState message="No events yet." />
-          ) : (
-            <div className="space-y-2.5">
-              {match.events.map((event) => (
-                <MatchEvent key={event.id} event={event} isHome={event.team?.id === match.home_team.id} />
-              ))}
-            </div>
-          )}
+      <div className="mt-4">
+        <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Match centre sections" />
+      </div>
+
+      <TabPanel idPrefix={ID_PREFIX} id="overview" active={tab === "overview"}>
+        <div className="space-y-4">
+          <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-md">
+            <h2 className="mb-3 text-sm font-semibold text-white">Form</h2>
+            {data.form ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <FormStrip form={data.form.home} title={match.home_team.name} />
+                <FormStrip form={data.form.away} title={match.away_team.name} />
+              </div>
+            ) : (
+              <p className="text-xs text-white/40">Form isn&apos;t available right now.</p>
+            )}
+            <p className="mt-3 text-[10px] text-white/30">
+              Results before this match only. Historical information, not a prediction.
+            </p>
+          </section>
+
+          <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-md">
+            {data.headToHead ? (
+              <HeadToHead match={match} data={data.headToHead} />
+            ) : (
+              <p className="text-xs text-white/40">Head-to-head isn&apos;t available right now.</p>
+            )}
+          </section>
+
+          {match.events.length > 0 && <Timeline match={match} />}
         </div>
-      </section>
+      </TabPanel>
+
+      <TabPanel idPrefix={ID_PREFIX} id="timeline" active={tab === "timeline"}>
+        {match.events.length > 0 ? (
+          <Timeline match={match} />
+        ) : (
+          <FeatureState
+            feature="match_events"
+            capabilities={capabilities}
+            pendingMessage={
+              notStarted ? "The timeline starts at kick-off." : "No events have been recorded for this match."
+            }
+          />
+        )}
+      </TabPanel>
+
+      <TabPanel idPrefix={ID_PREFIX} id="stats" active={tab === "stats"}>
+        {hasStatistics(statistics) ? (
+          <Statistics match={match} statistics={statistics} />
+        ) : (
+          <FeatureState
+            feature="match_statistics"
+            capabilities={capabilities}
+            pendingMessage={
+              notStarted ? "Statistics appear once the match is under way." : "No statistics have been supplied for this match."
+            }
+          />
+        )}
+      </TabPanel>
+
+      <TabPanel idPrefix={ID_PREFIX} id="lineups" active={tab === "lineups"}>
+        {lineups && (lineups.home || lineups.away) ? (
+          <Lineups home={lineups.home} away={lineups.away} />
+        ) : (
+          <FeatureState
+            feature="lineups"
+            capabilities={capabilities}
+            pendingMessage={
+              notStarted
+                ? "Lineups are usually published about an hour before kick-off."
+                : "Lineups haven't been published for this match."
+            }
+          />
+        )}
+      </TabPanel>
+
+      <TabPanel idPrefix={ID_PREFIX} id="table" active={tab === "table"}>
+        {standings && standings.length > 0 ? (
+          <StandingsTable
+            standings={standings}
+            highlightTeamIds={[match.home_team.id, match.away_team.id]}
+            title={`${match.competition.name} table`}
+          />
+        ) : (
+          <FeatureState
+            feature="standings"
+            capabilities={capabilities}
+            pendingMessage="No table is available for this competition yet."
+          />
+        )}
+      </TabPanel>
     </div>
   )
 }

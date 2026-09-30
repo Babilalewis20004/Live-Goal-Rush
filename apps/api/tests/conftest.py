@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 from fakeredis import aioredis as fakeredis_aioredis
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -17,12 +18,14 @@ from app.models import (  # noqa: F401
     competition,
     device,
     favourite,
+    lineup,
     match,
     match_event,
     notification,
     player,
     session as session_model,
     standing,
+    statistics,
     team,
     user,
 )
@@ -72,6 +75,9 @@ async def test_engine() -> AsyncGenerator[AsyncEngine, None]:
     await _ensure_test_database_exists()
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
+        # Phase 4's trigram search indexes need this extension (the
+        # migration creates it for real databases).
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -153,3 +159,54 @@ async def authenticated_client(client: AsyncClient, test_user: User) -> AsyncGen
     job)."""
     client.cookies.set("access_token", create_access_token(test_user.id))
     yield client
+
+
+# -- Phase 4 fixtures ----------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def get_match_id(test_engine: AsyncEngine):
+    """`await get_match_id("ucl-1")` -> the internal id of the match the mock
+    provider knows as "ucl-1" (API paths use internal ids)."""
+    from sqlalchemy import select
+
+    from app.models.match import Match
+
+    session_local = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+
+    async def _lookup(provider_id: str) -> int:
+        async with session_local() as session:
+            return (await session.execute(select(Match.id).where(Match.provider_id == provider_id))).scalar_one()
+
+    return _lookup
+
+
+@pytest_asyncio.fixture
+async def phase4_client(seeded_client: AsyncClient, test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
+    """`seeded_client` plus what the worker stores for every non-historical
+    match: lineups, team statistics and player statistics (`sync_match_extras`
+    -- the same call the live sync loop makes)."""
+    from sqlalchemy import select
+
+    from app.models.match import Match
+    from app.services.match_centre_service import MatchCentreService
+
+    session_local = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+    provider = MockFootballDataProvider()
+    async with session_local() as session:
+        football = FootballService(db=session, provider=provider)
+        centre = MatchCentreService(session, provider, football=football)
+        matches = (
+            (await session.execute(select(Match).where(~Match.provider_id.startswith("hist-")))).scalars().all()
+        )
+        for match in matches:
+            await centre.sync_match_extras(match)
+        await session.commit()
+    yield seeded_client
+
+
+@pytest_asyncio.fixture
+async def session_factory(test_engine: AsyncEngine):
+    """An `async_sessionmaker` on the per-test database, for tests that
+    drive service-layer code (sync methods) directly."""
+    return async_sessionmaker(bind=test_engine, expire_on_commit=False)

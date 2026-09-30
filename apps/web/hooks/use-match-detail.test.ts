@@ -127,3 +127,91 @@ describe("applyRealtimeMessage (match detail)", () => {
     expect(next.events.map((e) => e.minute)).toEqual([20, 80])
   })
 })
+
+describe("applyRealtimeMessage (Phase 4 payload fields)", () => {
+  it("keeps added time and orders it after the regular minute", () => {
+    const match = detail({
+      id: 1,
+      events: [
+        {
+          id: 1,
+          event_type: "yellow_card",
+          minute: 45,
+          extra_minute: null,
+          team: HOME,
+          player: null,
+          assist_player: null,
+          description: null,
+        },
+      ],
+    })
+    const message: RealtimeMessage = {
+      type: "CARD",
+      match: {
+        id: "1",
+        home_score: 1,
+        away_score: 0,
+        status: "live",
+        minute: 47,
+        event: {
+          id: 2,
+          event_type: "yellow_card",
+          minute: 45,
+          extra_minute: 2,
+          team_id: 2,
+          player: "Caicedo",
+          description: null,
+        },
+      },
+    }
+    const next = applyRealtimeMessage(match, message)
+    expect(next.events.map((e) => [e.id, e.minute, e.extra_minute])).toEqual([
+      [1, 45, null],
+      [2, 45, 2],
+    ])
+  })
+
+  it("a substitution carries who went off as assist_player", () => {
+    const message: RealtimeMessage = {
+      type: "SUBSTITUTION",
+      match: {
+        id: "1",
+        home_score: 1,
+        away_score: 0,
+        status: "live",
+        minute: 60,
+        event: {
+          id: 9,
+          event_type: "substitution",
+          minute: 60,
+          team_id: 1,
+          player: "Rodrygo",
+          assist: "Vinícius Jr.",
+          description: null,
+          event_detail: "Tactical",
+        },
+      },
+    }
+    const [added] = applyRealtimeMessage(detail({ id: 1 }), message).events
+    expect(added.player?.name).toBe("Rodrygo")
+    expect(added.assist_player?.name).toBe("Vinícius Jr.")
+    expect(added.event_detail).toBe("Tactical")
+  })
+
+  it("a statistics-only message still updates score/status/minute and adds no event", () => {
+    const message: RealtimeMessage = {
+      type: "STATISTICS_UPDATED",
+      match: {
+        id: "1",
+        home_score: 1,
+        away_score: 0,
+        status: "live",
+        minute: 41,
+        statistics: { home: null, away: null },
+      },
+    }
+    const next = applyRealtimeMessage(detail({ id: 1, minute: 40 }), message)
+    expect(next.minute).toBe(41)
+    expect(next.events).toEqual([])
+  })
+})

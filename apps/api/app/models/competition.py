@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Enum, String
+from sqlalchemy import Enum, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -10,6 +10,14 @@ from app.models.mixins import TimestampMixin
 
 class Competition(Base, TimestampMixin):
     __tablename__ = "competitions"
+    __table_args__ = (
+        Index(
+            "ix_competitions_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     provider_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)

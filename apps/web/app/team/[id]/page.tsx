@@ -1,13 +1,20 @@
 import { notFound } from "next/navigation"
 import Link from "next/link"
 import { AnimatedBackground } from "@/components/animated-background"
+import { TeamCentre } from "@/components/team-centre"
 import { TeamHeader } from "@/components/team-header"
-import { MatchCard } from "@/components/match-card"
-import { EmptyState } from "@/components/ui/empty-state"
 import { api, ApiError } from "@/lib/api"
 import { getServerFavourites } from "@/lib/server-auth"
 
 export const dynamic = "force-dynamic"
+
+async function optional<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise
+  } catch {
+    return null
+  }
+}
 
 export default async function TeamPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -22,17 +29,23 @@ export default async function TeamPage({ params }: { params: Promise<{ id: strin
     throw error
   }
 
-  const [fixtures, results, favourites] = await Promise.all([
+  const [fixtures, results, favourites, capabilities, overall, home, away, squad, statistics] = await Promise.all([
     api.getTeamFixtures(teamId),
-    api.getTeamResults(teamId),
+    api.getTeamResults(teamId, 1, 20),
     getServerFavourites(),
+    optional(api.getCapabilities()),
+    optional(api.getTeamForm(teamId, "overall")),
+    optional(api.getTeamForm(teamId, "home")),
+    optional(api.getTeamForm(teamId, "away")),
+    optional(api.getTeamSquad(teamId)),
+    optional(api.getTeamStatistics(teamId)),
   ])
   const initialFollowed = favourites?.teams.some((f) => f.team.id === teamId) ?? false
 
   return (
     <main className="relative min-h-screen text-white">
       <AnimatedBackground />
-      <div className="mx-auto max-w-2xl px-4 pb-16 pt-6">
+      <div className="mx-auto max-w-3xl px-4 pb-16 pt-6">
         <Link href="/" className="text-xs text-white/50 hover:text-white/80">
           ← Back to livescores
         </Link>
@@ -41,39 +54,19 @@ export default async function TeamPage({ params }: { params: Promise<{ id: strin
           <TeamHeader team={team} initialFollowed={initialFollowed} />
         </div>
 
-        <section className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">
-          <h2 className="border-b border-white/[0.06] px-4 py-3 text-sm font-semibold text-white">
-            Upcoming Fixtures
-          </h2>
-          {fixtures.items.length === 0 ? (
-            <div className="px-4 py-4">
-              <EmptyState message="No upcoming fixtures." />
-            </div>
-          ) : (
-            <div className="divide-y divide-white/[0.06]">
-              {fixtures.items.map((match) => (
-                <MatchCard key={match.id} match={match} />
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="mt-4 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md">
-          <h2 className="border-b border-white/[0.06] px-4 py-3 text-sm font-semibold text-white">
-            Recent Results
-          </h2>
-          {results.items.length === 0 ? (
-            <div className="px-4 py-4">
-              <EmptyState message="No recent results." />
-            </div>
-          ) : (
-            <div className="divide-y divide-white/[0.06]">
-              {results.items.map((match) => (
-                <MatchCard key={match.id} match={match} />
-              ))}
-            </div>
-          )}
-        </section>
+        <div className="mt-4">
+          <TeamCentre
+            data={{
+              team,
+              fixtures: fixtures.items,
+              results: results.items,
+              form: { overall, home, away },
+              squad,
+              statistics,
+              capabilities,
+            }}
+          />
+        </div>
       </div>
     </main>
   )

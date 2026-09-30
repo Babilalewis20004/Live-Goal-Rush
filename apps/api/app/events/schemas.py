@@ -26,6 +26,11 @@ class RealtimeEventType(str, enum.Enum):
     MATCH_FINISHED = "MATCH_FINISHED"
     MATCH_POSTPONED = "MATCH_POSTPONED"
     MATCH_CANCELLED = "MATCH_CANCELLED"
+    # Phase 4: match-centre data changed (see change_detection.py). Never
+    # notified (not in DEFAULT_ON_EVENT_TYPES) -- they only refresh open
+    # match-centre screens.
+    LINEUP_UPDATED = "LINEUP_UPDATED"
+    STATISTICS_UPDATED = "STATISTICS_UPDATED"
 
 
 class RealtimeEvent(BaseModel):

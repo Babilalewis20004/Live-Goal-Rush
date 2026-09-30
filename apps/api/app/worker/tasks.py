@@ -25,16 +25,21 @@ from app.core.config import settings
 from app.core.redis_client import get_sync_redis_service
 from app.core.redis_keys import RedisKeys
 from app.db.session import AsyncSessionLocal
+from app.events.schemas import RealtimeEventType
+from app.models.competition import Competition
 from app.models.enums import MatchStatus
 from app.models.match import Match
+from app.models.team import Team
 from app.schemas.match import MatchDetail
 from app.services.change_detection import build_state_snapshot, detect_changes
 from app.services.football_service import FootballService
+from app.services.match_centre_service import MatchCentreService
 from app.services.providers import get_provider
 from app.services.providers.base import FootballDataProvider
+from app.services.team_player_service import TeamPlayerService
 from app.worker.async_runner import run as _run
 from app.worker.celery_app import celery_app
-from app.worker.provider_guard import ProviderUnavailableError, call_with_backoff
+from app.worker.provider_guard import GuardedProvider, ProviderUnavailableError, call_with_backoff
 from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,40 @@ _NEAR_KICKOFF_WINDOW = timedelta(minutes=15)
 _POST_MATCH_WINDOW = timedelta(minutes=30)
 
 
-def _publish_changes(match: MatchDetail) -> None:
+# Events that only refresh an open match-centre screen. They are published
+# to the WebSocket channel but never handed to the notification dispatcher.
+_NON_NOTIFIABLE = {RealtimeEventType.LINEUP_UPDATED, RealtimeEventType.STATISTICS_UPDATED}
+
+
+def _invalidate_after_finish(redis, match: MatchDetail) -> None:
+    """A match just became FINISHED: the competition's table, top scorers
+    and both teams' form/statistics are now out of date (Phase 4 §19), and
+    a fresh standings sync is queued. Nothing here runs for in-play events
+    -- a live goal doesn't change *official* standings."""
+    redis.delete(
+        RedisKeys.competition_standings(match.competition.id),
+        RedisKeys.competition_top_scorers(match.competition.id),
+        RedisKeys.competition_fixtures(match.competition.id, datetime.now(timezone.utc).date()),
+        RedisKeys.team_form(match.home_team.id, "overall"),
+        RedisKeys.team_form(match.home_team.id, "home"),
+        RedisKeys.team_form(match.home_team.id, "away"),
+        RedisKeys.team_form(match.away_team.id, "overall"),
+        RedisKeys.team_form(match.away_team.id, "home"),
+        RedisKeys.team_form(match.away_team.id, "away"),
+        RedisKeys.team_statistics(match.home_team.id),
+        RedisKeys.team_statistics(match.away_team.id),
+        RedisKeys.team_fixtures(match.home_team.id),
+        RedisKeys.team_fixtures(match.away_team.id),
+    )
+    try:
+        sync_competition_standings.delay(match.competition.id)
+    except Exception:
+        logger.warning("Failed to enqueue sync_competition_standings for %s", match.competition.id, exc_info=True)
+
+
+def _publish_changes(
+    match: MatchDetail, *, lineup_fingerprint: str | None = None, statistics: dict | None = None
+) -> None:
     # Deferred import: `notification_tasks` imports `celery_app`, which
     # (at module scope) imports `tasks` back for its own side effects --
     # importing it at call time instead of at this module's top avoids a
@@ -54,16 +92,35 @@ def _publish_changes(match: MatchDetail) -> None:
     redis = get_sync_redis_service()
     state_key = RedisKeys.match_state(match.id)
     previous = redis.get(state_key)
-    changes = detect_changes(match, previous)
-    redis.set(state_key, build_state_snapshot(match))
+    changes = detect_changes(match, previous, lineup_fingerprint=lineup_fingerprint, statistics=statistics)
+    redis.set(state_key, build_state_snapshot(match, lineup_fingerprint=lineup_fingerprint, statistics=statistics))
     # Invalidate the cache-aside entries this match affects so the next API
     # request sees the new state immediately instead of waiting out the TTL.
     redis.delete(RedisKeys.match(match.id), RedisKeys.LIVE_MATCHES, RedisKeys.TODAY_MATCHES)
+    changed_types = {c.type for c in changes}
+    # The lineup response embeds each player's substitution minutes (derived
+    # from the timeline), so a new substitution stales it just like a
+    # changed lineup does.
+    if RealtimeEventType.LINEUP_UPDATED in changed_types or RealtimeEventType.SUBSTITUTION in changed_types:
+        redis.delete(RedisKeys.match_lineups(match.id))
+    if RealtimeEventType.STATISTICS_UPDATED in changed_types:
+        redis.delete(RedisKeys.match_statistics(match.id), RedisKeys.match_player_statistics(match.id))
+    if RealtimeEventType.MATCH_FINISHED in changed_types:
+        # A finished match's cached lineups/stats carry the short live TTL;
+        # drop them so the next read re-caches with the static one.
+        redis.delete(
+            RedisKeys.match_lineups(match.id),
+            RedisKeys.match_statistics(match.id),
+            RedisKeys.match_player_statistics(match.id),
+        )
+        _invalidate_after_finish(redis, match)
 
     for event in changes:
         logger.info("Match %s changed: %s", match.id, event.type.value)
         payload = event.model_dump(mode="json")
         redis.publish(RedisKeys.MATCH_EVENTS_CHANNEL, payload)
+        if event.type in _NON_NOTIFIABLE:
+            continue
         # A second, independent consumer of the same event (Phase 3 §12) --
         # dispatched as its own Celery task (not called inline) so a slow
         # or failing push provider can never slow down or crash the live
@@ -79,9 +136,20 @@ async def _sync_one_match(provider: FootballDataProvider, provider_match) -> Non
     async with AsyncSessionLocal() as db:
         service = FootballService(db=db, provider=provider)
         match = await service.sync_match(provider_match, with_events=True)
+        centre = MatchCentreService(db, GuardedProvider(provider), football=service)
+        try:
+            await centre.sync_match_extras(match)
+        except ProviderUnavailableError:
+            # Lineups/statistics are supplementary: the score/events sync
+            # above already succeeded, so keep publishing that and pick the
+            # extras up again next cycle.
+            metrics.sync_job_failed()
+            logger.error("match extras unavailable for %s; continuing without them", provider_match.provider_id)
         await db.commit()
         detail = await service.get_match(match.id)
-    _publish_changes(detail)
+        lineup_fingerprint = await centre.lineup_fingerprint(match.id)
+        statistics = await centre.statistics_snapshot(match)
+    _publish_changes(detail, lineup_fingerprint=lineup_fingerprint, statistics=statistics)
 
 
 @celery_app.task(name="app.worker.tasks.sync_live_matches")
@@ -241,6 +309,10 @@ def sync_competitions() -> None:
                 for provider_match in fixtures:
                     await service.sync_match(provider_match, with_events=True)
                 await service.sync_standings(competition)
+                try:
+                    await TeamPlayerService(db, GuardedProvider(provider), service).sync_top_scorers(competition)
+                except ProviderUnavailableError:
+                    metrics.sync_job_failed()
             await db.commit()
 
     _run(_run_task())
@@ -248,14 +320,29 @@ def sync_competitions() -> None:
 
 @celery_app.task(name="app.worker.tasks.sync_team")
 def sync_team(team_provider_id: str) -> None:
-    """Team metadata + fixtures sync (spec §7). Not on a fixed beat
-    schedule -- enqueued on demand (e.g. a Phase 3 "follow this team"
-    feature would call `sync_team.delay(team_id)`); included now so the
-    capability exists without over-scheduling it for Phase 2's needs."""
+    """Team metadata + squad + fixtures sync (spec §7). Not on a fixed beat
+    schedule -- enqueued on demand (following a team, or opening a team page
+    whose squad hasn't been stored yet); the squad is what makes the team
+    page's Squad section and player pages possible."""
 
     async def _run_task() -> None:
         provider = get_provider()
         metrics.sync_job_started()
+
+        async with AsyncSessionLocal() as db:
+            service = FootballService(db=db, provider=provider)
+            team = (
+                await db.execute(select(Team).where(Team.provider_id == team_provider_id))
+            ).scalar_one_or_none()
+            if team is not None and provider.capabilities.team_squads:
+                try:
+                    await TeamPlayerService(db, GuardedProvider(provider), service).sync_squad(team)
+                    await db.commit()
+                    get_sync_redis_service().delete(RedisKeys.team_squad(team.id), RedisKeys.team(team.id))
+                except ProviderUnavailableError:
+                    metrics.sync_job_failed()
+                    logger.error("sync_team: squad unavailable for %s", team_provider_id)
+
         try:
             fixtures = await call_with_backoff(
                 f"get_team_fixtures({team_provider_id})",
@@ -273,3 +360,60 @@ def sync_team(team_provider_id: str) -> None:
             await db.commit()
 
     _run(_run_task())
+
+
+@celery_app.task(name="app.worker.tasks.sync_player")
+def sync_player(player_provider_id: str) -> None:
+    """Player profile sync -- enqueued by the player page when a player only
+    exists as a stub created from a match event or lineup."""
+
+    async def _run_task() -> None:
+        provider = get_provider()
+        metrics.sync_job_started()
+        async with AsyncSessionLocal() as db:
+            try:
+                player = await TeamPlayerService(db, GuardedProvider(provider)).sync_player(player_provider_id)
+            except ProviderUnavailableError:
+                metrics.sync_job_failed()
+                logger.error("sync_player: provider unavailable for %s", player_provider_id)
+                return
+            await db.commit()
+            if player is not None:
+                get_sync_redis_service().delete(RedisKeys.player(player.id), RedisKeys.player_statistics(player.id))
+
+    _run(_run_task())
+
+
+async def sync_competition_standings_now(competition_id: int) -> None:
+    """The body of `sync_competition_standings`, as a coroutine so it can be
+    driven directly (tests, the end-to-end scenario) as well as by Celery."""
+    provider = get_provider()
+    metrics.sync_job_started()
+    async with AsyncSessionLocal() as db:
+        competition = (
+            await db.execute(select(Competition).where(Competition.id == competition_id))
+        ).scalar_one_or_none()
+        if competition is None:
+            return
+        guarded = GuardedProvider(provider)
+        service = FootballService(db=db, provider=guarded)
+        try:
+            await service.sync_standings(competition)
+            await TeamPlayerService(db, guarded, service).sync_top_scorers(competition)
+        except ProviderUnavailableError:
+            metrics.sync_job_failed()
+            logger.error("sync_competition_standings: provider unavailable for %s", competition_id)
+            return
+        await db.commit()
+    get_sync_redis_service().delete(
+        RedisKeys.competition_standings(competition_id), RedisKeys.competition_top_scorers(competition_id)
+    )
+
+
+@celery_app.task(name="app.worker.tasks.sync_competition_standings")
+def sync_competition_standings(competition_id: int) -> None:
+    """Standings + top scorers for ONE competition (Phase 4 §19). Queued by
+    change detection when a match in the competition becomes FINISHED --
+    standings are based on completed matches, so live goals don't trigger a
+    re-sync; the periodic `sync_competitions` job remains the backstop."""
+    _run(sync_competition_standings_now(competition_id))

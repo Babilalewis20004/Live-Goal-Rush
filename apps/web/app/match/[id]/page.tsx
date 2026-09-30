@@ -6,6 +6,17 @@ import { getServerFavourites } from "@/lib/server-auth"
 
 export const dynamic = "force-dynamic"
 
+/** The supplementary match-centre resources are each allowed to fail on their
+ * own (the tab shows an honest empty state) -- only the match itself is
+ * essential to render the page. */
+async function optional<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise
+  } catch {
+    return null
+  }
+}
+
 export default async function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const matchId = Number(id)
@@ -19,13 +30,25 @@ export default async function MatchPage({ params }: { params: Promise<{ id: stri
     throw error
   }
 
-  const favourites = await getServerFavourites()
+  const [capabilities, lineups, statistics, form, headToHead, standings, favourites] = await Promise.all([
+    optional(api.getCapabilities()),
+    optional(api.getMatchLineups(matchId)),
+    optional(api.getMatchStatistics(matchId)),
+    optional(api.getMatchForm(matchId)),
+    optional(api.getMatchHeadToHead(matchId)),
+    optional(api.getStandings(match.competition.id)),
+    getServerFavourites(),
+  ])
   const initialFollowed = favourites?.matches.some((f) => f.match.id === matchId) ?? false
 
   return (
     <main className="relative min-h-screen text-white">
       <AnimatedBackground />
-      <MatchDetailLive initialMatch={match} initialFollowed={initialFollowed} />
+      <MatchDetailLive
+        initialMatch={match}
+        initialFollowed={initialFollowed}
+        data={{ capabilities, lineups, statistics, form, headToHead, standings }}
+      />
     </main>
   )
 }

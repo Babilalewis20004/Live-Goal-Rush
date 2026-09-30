@@ -59,6 +59,7 @@ class MatchEventOut(BaseModel):
     player: PlayerOut | None
     assist_player: PlayerOut | None
     description: str | None
+    event_detail: str | None = None
 
 
 class MatchDetail(MatchSummary):

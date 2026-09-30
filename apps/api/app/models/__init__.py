@@ -1,12 +1,14 @@
 from app.models.competition import Competition
 from app.models.device import Device
 from app.models.favourite import FavouriteCompetition, FavouriteMatch, FavouriteTeam
+from app.models.lineup import LineupPlayer, MatchLineup
 from app.models.match import Match
 from app.models.match_event import MatchEvent
 from app.models.notification import NotificationLog, NotificationPreference
 from app.models.player import Player
 from app.models.session import PasswordResetToken, RefreshToken
 from app.models.standing import Standing
+from app.models.statistics import MatchStatistic, PlayerMatchStatistic, PlayerSeasonStatistic
 from app.models.team import Team
 from app.models.user import User
 
@@ -17,6 +19,11 @@ __all__ = [
     "Match",
     "MatchEvent",
     "Standing",
+    "MatchLineup",
+    "LineupPlayer",
+    "MatchStatistic",
+    "PlayerMatchStatistic",
+    "PlayerSeasonStatistic",
     "User",
     "RefreshToken",
     "PasswordResetToken",

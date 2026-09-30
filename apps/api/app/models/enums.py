@@ -22,6 +22,7 @@ class MatchEventType(str, enum.Enum):
     PENALTY = "penalty"
     PENALTY_MISSED = "penalty_missed"
     YELLOW_CARD = "yellow_card"
+    SECOND_YELLOW = "second_yellow"
     RED_CARD = "red_card"
     SUBSTITUTION = "substitution"
     VAR = "var"

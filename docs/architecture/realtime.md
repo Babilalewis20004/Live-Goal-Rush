@@ -95,7 +95,11 @@ every poll would broadcast a flood of false `GOAL`/`CARD` events.
 `app/events/schemas.py::RealtimeEvent`. Types: `MATCH_STARTED`,
 `MATCH_UPDATED`, `GOAL`, `CARD`, `SUBSTITUTION`, `HALF_TIME`,
 `SECOND_HALF_STARTED`, `MATCH_FINISHED`, `MATCH_POSTPONED`,
-`MATCH_CANCELLED` (`RealtimeEventType`). Adding a new type is additive —
+`MATCH_CANCELLED`, and (Phase 4) `LINEUP_UPDATED`, `STATISTICS_UPDATED`
+(`RealtimeEventType`). The Phase 4 types ride the same channel and message
+shape; they fire only when the stored lineup fingerprint / team statistics
+differ from the last-published snapshot, carry the statistics in the
+payload, and are never push-notified — see `match-centre.md` §5. Adding a new type is additive —
 extend the enum, extend `change_detection.py`'s mapping — no existing
 consumer needs to change to keep working (unrecognized types are just
 values clients don't specially handle yet).

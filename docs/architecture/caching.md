@@ -54,6 +54,13 @@ in the codebase hand-types a Redis key string.
 | `football:competition:{id}:standings` | `/competitions/{id}/standings` result | `REDIS_DEFAULT_TTL_SECONDS` |
 | `football:team:{id}:fixtures` | Both `/teams/{id}/fixtures` and `/teams/{id}/results` (filtered client-side from one cached list — see below) | `REDIS_DEFAULT_TTL_SECONDS` |
 | `football:competitions` | `/competitions` list (not in the spec's minimum cache list, but cheap and near-static — see below) | `REDIS_DEFAULT_TTL_SECONDS` |
+| `football:competition:{id}:standings[:{season}]` | *(Phase 4)* Standings; no suffix = latest season (the one invalidated on full time) | `REDIS_DEFAULT_TTL_SECONDS` |
+| `football:competition:{id}:top-scorers[:{season}]` | *(Phase 4)* Top scorers | `REDIS_DEFAULT_TTL_SECONDS` |
+| `football:match:{id}:lineups` · `:statistics` · `:players` | *(Phase 4)* Match-centre data | by match status: live `REDIS_LIVE_MATCH_TTL_SECONDS`, scheduled `REDIS_DEFAULT_TTL_SECONDS`, finished `REDIS_STATIC_TTL_SECONDS` |
+| `football:match:{id}:form[:venue]` · `:h2h` | *(Phase 4)* Form/head-to-head going into the match (only results *before* it, so they don't change) | `REDIS_STATIC_TTL_SECONDS` |
+| `football:team:{id}` · `:squad` · `football:player:{id}` | *(Phase 4)* Team detail (+competitions), squad, player profile | detail `REDIS_DEFAULT_TTL_SECONDS`; squad/profile `REDIS_STATIC_TTL_SECONDS` |
+| `football:team:{id}:form:{overall\|home\|away}` · `:statistics` · `football:player:{id}:statistics` | *(Phase 4)* | `REDIS_DEFAULT_TTL_SECONDS` |
+| `football:sync-requested:{kind}:{id}` | *(Phase 4)* Debounce marker for "a read asked the worker to fetch this" (squad/profile) — at most one enqueue per hour | 1 h |
 | `football:events` | Not a cache entry — the Pub/Sub channel the worker publishes `RealtimeEvent`s to (see realtime.md) | n/a |
 
 **`/matches/{id}/events` deliberately has no separate
@@ -91,6 +98,22 @@ per call site:
   (fixtures sync runs every 5+ minutes — see
   `development/background-workers.md`), so a longer TTL is safe and cuts
   database load without serving noticeably stale data.
+
+**Phase 4 adds a third tier, `REDIS_STATIC_TTL_SECONDS` (default 3600s)** —
+data that effectively never changes once written: a finished match's
+lineups/statistics, squads, player profiles, and match-context
+form/head-to-head. Match-centre data picks its TTL from the match status
+(`match_centre_service.cache_ttl_for_status`), so the same entry is cached
+30 s while live and an hour once finished.
+
+Invalidation is event-driven on top of the TTLs
+(`worker/tasks.py::_publish_changes`): a `LINEUP_UPDATED` or
+`SUBSTITUTION` drops the match's lineups key (the lineup response embeds
+substitution minutes), `STATISTICS_UPDATED` drops statistics/player
+statistics, and `MATCH_FINISHED` drops lineups/statistics (so they re-cache
+with the static TTL) **and** the competition's standings and top scorers,
+both teams' form/statistics/fixtures, then queues
+`sync_competition_standings`. In-play goals do not touch standings.
 
 Do **not** raise `REDIS_LIVE_MATCH_TTL_SECONDS` to match the slower tier —
 a long TTL on live data is explicitly called out as a mistake to avoid

@@ -1,17 +1,29 @@
 import type {
   AuthResponse,
+  Capabilities,
   CompetitionOut,
   DeviceOut,
   FavouritesOut,
+  HeadToHeadOut,
   MatchDetail,
+  MatchFormOut,
+  MatchLineupsOut,
+  MatchPlayerStatisticsOut,
+  MatchStatisticsOut,
   MatchSummary,
   NotificationPreferenceOut,
   NotificationScope,
   Page,
+  PlayerDetail,
+  PlayerOut,
+  PlayerStatisticsOut,
   RealtimeEventType,
   SearchResults,
   StandingEntry,
-  TeamOut,
+  TeamDetail,
+  TeamFormOut,
+  TeamStatisticsOut,
+  TopScorersOut,
   UserOut,
 } from "@/types/api"
 
@@ -93,17 +105,41 @@ export const api = {
   getUpcomingMatches: () => apiFetch<MatchSummary[]>("/api/v1/matches/upcoming"),
   getMatch: (id: number) => apiFetch<MatchDetail>(`/api/v1/matches/${id}`),
   getMatchEvents: (id: number) => apiFetch<MatchDetail["events"]>(`/api/v1/matches/${id}/events`),
+  getMatchLineups: (id: number) => apiFetch<MatchLineupsOut>(`/api/v1/matches/${id}/lineups`),
+  getMatchStatistics: (id: number) => apiFetch<MatchStatisticsOut>(`/api/v1/matches/${id}/statistics`),
+  getMatchPlayers: (id: number) => apiFetch<MatchPlayerStatisticsOut>(`/api/v1/matches/${id}/players`),
+  getMatchForm: (id: number, scope: "overall" | "venue" = "overall") =>
+    apiFetch<MatchFormOut>(`/api/v1/matches/${id}/form${query({ scope: scope === "overall" ? undefined : scope })}`),
+  getMatchHeadToHead: (id: number) => apiFetch<HeadToHeadOut>(`/api/v1/matches/${id}/head-to-head`),
 
   getCompetitions: (page = 1, pageSize = 50) =>
     apiFetch<Page<CompetitionOut>>(`/api/v1/competitions${query({ page, page_size: pageSize })}`),
   getCompetition: (id: number) => apiFetch<CompetitionOut>(`/api/v1/competitions/${id}`),
-  getCompetitionFixtures: (id: number, page = 1, pageSize = 50) =>
+  /** `scope`: "all" (default), "upcoming" (fixtures) or "results" (most recent first). */
+  getCompetitionFixtures: (
+    id: number,
+    page = 1,
+    pageSize = 50,
+    scope: "all" | "upcoming" | "results" = "all",
+  ) =>
     apiFetch<Page<MatchSummary>>(
-      `/api/v1/competitions/${id}/fixtures${query({ page, page_size: pageSize })}`,
+      `/api/v1/competitions/${id}/fixtures${query({ page, page_size: pageSize, scope: scope === "all" ? undefined : scope })}`,
     ),
-  getStandings: (id: number) => apiFetch<StandingEntry[]>(`/api/v1/competitions/${id}/standings`),
+  getStandings: (id: number, season?: string, group?: string) =>
+    apiFetch<StandingEntry[]>(`/api/v1/competitions/${id}/standings${query({ season, group })}`),
+  getTopScorers: (id: number, season?: string) =>
+    apiFetch<TopScorersOut>(`/api/v1/competitions/${id}/top-scorers${query({ season })}`),
 
-  getTeam: (id: number) => apiFetch<TeamOut>(`/api/v1/teams/${id}`),
+  getTeam: (id: number) => apiFetch<TeamDetail>(`/api/v1/teams/${id}`),
+  getTeamSquad: (id: number) => apiFetch<PlayerOut[]>(`/api/v1/teams/${id}/players`),
+  getTeamStatistics: (id: number) => apiFetch<TeamStatisticsOut>(`/api/v1/teams/${id}/statistics`),
+  getTeamForm: (id: number, scope: "overall" | "home" | "away" = "overall") =>
+    apiFetch<TeamFormOut>(`/api/v1/teams/${id}/form${query({ scope: scope === "overall" ? undefined : scope })}`),
+
+  getPlayer: (id: number) => apiFetch<PlayerDetail>(`/api/v1/players/${id}`),
+  getPlayerStatistics: (id: number) => apiFetch<PlayerStatisticsOut>(`/api/v1/players/${id}/statistics`),
+
+  getCapabilities: () => apiFetch<Capabilities>("/api/v1/capabilities"),
   getTeamFixtures: (id: number, page = 1, pageSize = 50) =>
     apiFetch<Page<MatchSummary>>(`/api/v1/teams/${id}/fixtures${query({ page, page_size: pageSize })}`),
   getTeamResults: (id: number, page = 1, pageSize = 50) =>
