@@ -1,31 +1,58 @@
-import Constants from "expo-constants"
+import Constants, { ExecutionEnvironment } from "expo-constants"
 import * as Device from "expo-device"
-import * as Notifications from "expo-notifications"
 import { router } from "expo-router"
 import { Platform } from "react-native"
 
 import { ApiError, api } from "@/lib/api"
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-})
+type NotificationsModule = typeof import("expo-notifications")
+
+/** Remote push was removed from Expo Go (SDK 53+), and merely *importing*
+ * `expo-notifications` there throws on Android -- which used to crash the
+ * whole app at start-up, since this file is imported by the auth provider.
+ * So the module is loaded lazily, and never in Expo Go; a development build
+ * (or a production build) gets the full behaviour. */
+const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient
+
+let notificationsPromise: Promise<NotificationsModule | null> | null = null
+
+function loadNotifications(): Promise<NotificationsModule | null> {
+  if (isExpoGo) return Promise.resolve(null)
+  if (!notificationsPromise) {
+    notificationsPromise = import("expo-notifications")
+      .then((module) => {
+        module.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: false,
+            shouldSetBadge: false,
+            shouldShowBanner: true,
+            shouldShowList: true,
+          }),
+        })
+        return module
+      })
+      .catch((error) => {
+        console.warn("Push notifications unavailable:", error)
+        return null
+      })
+  }
+  return notificationsPromise
+}
 
 /** Called once, after login succeeds (Phase 3 §17) -- an anonymous user
  * has no `Device` row to attach a token to. Degrades gracefully (logs and
  * returns) rather than throwing whenever push isn't actually available in
- * this environment: no physical device, no notification permission, or
- * (most likely here) this Expo project not yet linked to an EAS project --
- * that one-time `expo.dev` account step is outside what a code change can
- * do, exactly like this repo already ships `RealFootballDataProvider`
- * behind an interface without real API credentials configured. */
+ * this environment: Expo Go, no physical device, no notification permission,
+ * or this Expo project not yet linked to an EAS project -- that one-time
+ * `expo.dev` account step is outside what a code change can do. */
 export async function registerForPushNotificationsAsync(): Promise<void> {
   if (!Device.isDevice) {
+    return
+  }
+
+  const Notifications = await loadNotifications()
+  if (!Notifications) {
     return
   }
 
@@ -67,15 +94,26 @@ export async function registerForPushNotificationsAsync(): Promise<void> {
  * payload the backend's `NotificationService` and the web service worker
  * both use, and navigates using the existing Expo Router paths -- no new
  * navigation structure needed. Call once from the root layout; returns
- * the unsubscribe function for cleanup. */
+ * the unsubscribe function for cleanup (a no-op where push isn't available). */
 export function addNotificationResponseListener(): () => void {
-  const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-    const data = response.notification.request.content.data as
-      | { type?: string; id?: number | string }
-      | undefined
-    if (data?.type && data.id != null) {
-      router.push(`/${data.type}/${data.id}` as Parameters<typeof router.push>[0])
-    }
+  let unsubscribe: (() => void) | null = null
+  let cancelled = false
+
+  void loadNotifications().then((Notifications) => {
+    if (!Notifications || cancelled) return
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data as
+        | { type?: string; id?: number | string }
+        | undefined
+      if (data?.type && data.id != null) {
+        router.push(`/${data.type}/${data.id}` as Parameters<typeof router.push>[0])
+      }
+    })
+    unsubscribe = () => subscription.remove()
   })
-  return () => subscription.remove()
+
+  return () => {
+    cancelled = true
+    unsubscribe?.()
+  }
 }
