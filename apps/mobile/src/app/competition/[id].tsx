@@ -12,13 +12,22 @@ import {
   StandingsLegend,
   TopScorerRow,
 } from "@/components/match-centre/rows"
+import { SeasonChips } from "@/components/match-centre/season-chips"
 import { FeatureState, TabBar, type TabDef } from "@/components/match-centre/ui"
 import { TeamBadge } from "@/components/team-badge"
 import { useAuth } from "@/hooks/use-auth"
+import { useSeasonView } from "@/hooks/use-season-view"
 import { api, ApiError } from "@/lib/api"
 import { groupStandings } from "@/lib/match-centre"
 import { theme } from "@/theme"
-import type { Capabilities, CompetitionOut, MatchSummary, StandingEntry, TopScorersOut } from "@/types/api"
+import type {
+  Capabilities,
+  CompetitionOut,
+  CompetitionSeasonsOut,
+  MatchSummary,
+  StandingEntry,
+  TopScorersOut,
+} from "@/types/api"
 
 type TabId = "standings" | "fixtures" | "results" | "scorers"
 
@@ -36,6 +45,7 @@ interface Loaded {
   results: MatchSummary[]
   topScorers: TopScorersOut | null
   capabilities: Capabilities | null
+  seasons: CompetitionSeasonsOut | null
 }
 
 async function optional<T>(promise: Promise<T>): Promise<T | null> {
@@ -54,21 +64,35 @@ export default function CompetitionScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabId>("standings")
+  const view = useSeasonView(
+    Number(id),
+    { standings: loaded?.standings ?? null, topScorers: loaded?.topScorers ?? null },
+    loaded?.seasons ?? null,
+  )
 
   const load = useCallback(async () => {
     setError(null)
     try {
       const competitionId = Number(id)
-      const [competition, fixtures, results, standings, topScorers, capabilities, favourites] = await Promise.all([
+      const [competition, fixtures, results, standings, topScorers, capabilities, seasons, favourites] = await Promise.all([
         api.getCompetition(competitionId),
         api.getCompetitionFixtures(competitionId, 1, 50, "upcoming"),
         api.getCompetitionFixtures(competitionId, 1, 50, "results"),
         optional(api.getStandings(competitionId)),
         optional(api.getTopScorers(competitionId)),
         optional(api.getCapabilities()),
+        optional(api.getCompetitionSeasons(competitionId)),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
       ])
-      setLoaded({ competition, standings, fixtures: fixtures.items, results: results.items, topScorers, capabilities })
+      setLoaded({
+        competition,
+        standings,
+        fixtures: fixtures.items,
+        results: results.items,
+        topScorers,
+        capabilities,
+        seasons,
+      })
       setInitialFollowed(favourites?.competitions.some((f) => f.competition.id === competitionId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Competition not found." : "Unable to load this competition.")
@@ -84,8 +108,23 @@ export default function CompetitionScreen() {
 
   const rows = useMemo<{ key: string; node: ReactNode }[]>(() => {
     if (!loaded) return []
-    const { standings, fixtures, results, topScorers, capabilities } = loaded
+    const { fixtures, results, capabilities, seasons } = loaded
+    const { standings, topScorers } = view
     const out: { key: string; node: ReactNode }[] = []
+    const seasonRow = {
+      key: "season",
+      node: <SeasonChips info={seasons} value={view.season} onChange={view.select} />,
+    }
+    const seasonStatus = view.loading ? (
+      <EmptyState message={`Loading season ${view.season}… this can take a few seconds the first time.`} />
+    ) : view.gaveUp ? (
+      <EmptyState message={`Nothing is available for ${view.season} from the data provider.`} />
+    ) : null
+    if (tab === "standings" || tab === "scorers") out.push(seasonRow)
+    if (seasonStatus && (tab === "standings" || tab === "scorers")) {
+      out.push({ key: "season-status", node: seasonStatus })
+      return out
+    }
     if (tab === "standings") {
       if (standings && standings.length > 0) {
         for (const { group, rows: groupRows } of groupStandings(standings)) {
@@ -131,7 +170,7 @@ export default function CompetitionScreen() {
       })
     }
     return out
-  }, [loaded, tab])
+  }, [loaded, tab, view])
 
   if (loading) {
     return (

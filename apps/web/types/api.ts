@@ -239,6 +239,8 @@ export interface Capabilities {
   standings: boolean
   top_scorers: boolean
   venues: boolean
+  /** Can supply standings/top scorers for past seasons on request. */
+  historical_seasons: boolean
   head_to_head: boolean
   form: boolean
 }
@@ -433,4 +435,15 @@ export interface HeadToHeadOut {
   home_team_wins: number
   draws: number
   away_team_wins: number
+}
+
+/** `GET /competitions/{id}/seasons` -- feeds the season selector. */
+export interface CompetitionSeasonsOut {
+  /** Latest stored season (what standings default to). */
+  current: string | null
+  /** Every season with stored data, newest first. */
+  seasons: string[]
+  /** If true, asking for a season not in `seasons` queues a background sync
+   * and it shows up shortly (the immediate answer is empty). */
+  historical_supported: boolean
 }

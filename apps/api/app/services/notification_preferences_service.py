@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.device import Device
 from app.models.notification import NotificationPreference
+from app.events.schemas import RealtimeEventType
+from app.models.enums import NotificationScope
 from app.schemas.notification import DeviceRegister, NotificationPreferenceIn
 
 
@@ -89,3 +91,29 @@ class NotificationPreferencesService:
         result = await self._db.execute(stmt)
         await self._db.commit()
         return result.scalar_one()
+
+    async def remove(
+        self,
+        user_id: int,
+        scope_type: NotificationScope,
+        scope_id: int | None,
+        event_type: RealtimeEventType,
+    ) -> bool:
+        """Drop an explicit override so the (user, scope, event) falls back to
+        the default again. Idempotent; returns whether a row existed. Only ever
+        touches `user_id`'s own rows."""
+        scope_condition = (
+            NotificationPreference.scope_id.is_(None)
+            if scope_id is None
+            else NotificationPreference.scope_id == scope_id
+        )
+        result = await self._db.execute(
+            delete(NotificationPreference).where(
+                NotificationPreference.user_id == user_id,
+                NotificationPreference.scope_type == scope_type,
+                scope_condition,
+                NotificationPreference.event_type == event_type,
+            )
+        )
+        await self._db.commit()
+        return (result.rowcount or 0) > 0

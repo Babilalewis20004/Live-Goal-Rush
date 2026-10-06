@@ -36,6 +36,7 @@ services:
       FOOTBALL_DATA_PROVIDER: ${FOOTBALL_DATA_PROVIDER:-mock}
       FOOTBALL_API_BASE_URL: ${FOOTBALL_API_BASE_URL:-}
       FOOTBALL_API_KEY: ${FOOTBALL_API_KEY:-}
+      FOOTBALL_API_FEATURES: ${FOOTBALL_API_FEATURES:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       LIVE_POLL_INTERVAL_SECONDS: ${LIVE_POLL_INTERVAL_SECONDS:-15}
       UPCOMING_POLL_INTERVAL_SECONDS: ${UPCOMING_POLL_INTERVAL_SECONDS:-60}
@@ -78,7 +79,9 @@ services:
     build:
       context: ./apps/api
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
-    environment: *api_env
+    environment:
+      <<: *api_env
+      METRICS_ROLE: worker
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,7 +94,9 @@ services:
     build:
       context: ./apps/api
     command: celery -A app.worker.celery_app beat --loglevel=info
-    environment: *api_env
+    environment:
+      <<: *api_env
+      METRICS_ROLE: scheduler
     depends_on:
       postgres:
         condition: service_healthy

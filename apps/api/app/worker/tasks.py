@@ -417,3 +417,37 @@ def sync_competition_standings(competition_id: int) -> None:
     standings are based on completed matches, so live goals don't trigger a
     re-sync; the periodic `sync_competitions` job remains the backstop."""
     _run(sync_competition_standings_now(competition_id))
+
+
+async def sync_competition_season_now(competition_id: int, season: str) -> None:
+    """Backfill one *past* season's standings and top scorers (Phase 5),
+    queued when a client asks for a season we haven't stored."""
+    provider = get_provider()
+    metrics.sync_job_started()
+    async with AsyncSessionLocal() as db:
+        competition = (
+            await db.execute(select(Competition).where(Competition.id == competition_id))
+        ).scalar_one_or_none()
+        if competition is None:
+            return
+        guarded = GuardedProvider(provider)
+        service = FootballService(db=db, provider=guarded)
+        try:
+            await service.sync_standings(competition, season=season)
+            await TeamPlayerService(db, guarded, service).sync_top_scorers(competition, season=season)
+        except ProviderUnavailableError:
+            metrics.sync_job_failed()
+            logger.error("sync_competition_season: provider unavailable for %s %s", competition_id, season)
+            return
+        await db.commit()
+    get_sync_redis_service().delete(
+        RedisKeys.competition_standings(competition_id, season),
+        RedisKeys.competition_top_scorers(competition_id, season),
+        RedisKeys.competition_seasons(competition_id),
+    )
+
+
+@celery_app.task(name="app.worker.tasks.sync_competition_season")
+def sync_competition_season(competition_id: int, season: str) -> None:
+    """On-demand history backfill for one competition season."""
+    _run(sync_competition_season_now(competition_id, season))

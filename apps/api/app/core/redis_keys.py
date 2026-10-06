@@ -43,6 +43,10 @@ class RedisKeys:
         return base if season is None else f"{base}:{season}"
 
     @staticmethod
+    def competition_seasons(competition_id: int | str) -> str:
+        return f"football:competition:{competition_id}:seasons"
+
+    @staticmethod
     def competition_top_scorers(competition_id: int | str, season: str | None = None) -> str:
         base = f"football:competition:{competition_id}:top-scorers"
         return base if season is None else f"{base}:{season}"

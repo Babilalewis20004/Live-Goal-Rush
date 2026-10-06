@@ -29,12 +29,13 @@ export default async function CompetitionPage({ params }: { params: Promise<{ id
     throw error
   }
 
-  const [fixtures, results, standings, topScorers, capabilities, favourites] = await Promise.all([
+  const [fixtures, results, standings, topScorers, capabilities, seasons, favourites] = await Promise.all([
     api.getCompetitionFixtures(competitionId, 1, 50, "upcoming"),
     api.getCompetitionFixtures(competitionId, 1, 50, "results"),
     optional(api.getStandings(competitionId)),
     optional(api.getTopScorers(competitionId)),
     optional(api.getCapabilities()),
+    optional(api.getCompetitionSeasons(competitionId)),
     getServerFavourites(),
   ])
   const initialFollowed = favourites?.competitions.some((f) => f.competition.id === competitionId) ?? false
@@ -53,7 +54,15 @@ export default async function CompetitionPage({ params }: { params: Promise<{ id
 
         <div className="mt-4">
           <CompetitionCentre
-            data={{ standings, fixtures: fixtures.items, results: results.items, topScorers, capabilities }}
+            data={{
+              competitionId,
+              seasons,
+              standings,
+              fixtures: fixtures.items,
+              results: results.items,
+              topScorers,
+              capabilities,
+            }}
           />
         </div>
       </div>

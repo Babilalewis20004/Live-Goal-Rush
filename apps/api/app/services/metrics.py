@@ -6,13 +6,13 @@ Prometheus running. When `prometheus_client` is installed (it's in
 requirements.txt), the same increments also update collectors exposed by
 `GET /metrics`.
 
-Each process (the API, the worker, the scheduler) keeps its own counters --
-there is no cross-process aggregation here (that would need Prometheus's
-multiprocess mode, which is unnecessary complexity for Phase 2's scope).
-`/metrics` on the API process therefore reports API-process activity
-(cache hits/misses, WebSocket connections/messages); provider/sync counters
-are most meaningful read from the worker's own logs until a real metrics
-backend is introduced (see Phase 3 recommendations).
+Each process (the API, the worker, the scheduler) keeps its own in-process
+counters, as before. As of Phase 5 a process that calls
+`metrics.enable_aggregation(role, redis_client)` (the API lifespan and the
+Celery worker/beat start-up hooks do) also pushes them to Redis, and
+`GET /metrics` renders the combined, per-role view -- see
+`metrics_aggregation.py`. Processes that never enable it (unit tests) behave
+exactly as in Phase 2.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ class Metrics:
         self._counters: dict[str, int] = dict.fromkeys(self._COUNTER_NAMES, 0)
         self._websocket_connections = 0
         self._live_matches = 0
+        self._sink = None
 
         if _PROMETHEUS_AVAILABLE:
             self._prom_counters = {
@@ -60,8 +61,25 @@ class Metrics:
             self._prom_websocket_connections = None
             self._prom_live_matches = None
 
+    def enable_aggregation(self, role: str, redis_client) -> None:
+        """Start pushing this process's counters/gauges to Redis under `role`."""
+        from app.services.metrics_aggregation import RedisMetricsSink
+
+        self._sink = RedisMetricsSink(role, redis_client)
+        # publish the gauges' current values straight away
+        self._sink.set_gauge("websocket_connections", self._websocket_connections)
+        self._sink.set_gauge("live_matches", self._live_matches)
+
+    def flush(self) -> None:
+        """Force a push to Redis (e.g. before rendering /metrics)."""
+        if self._sink is not None:
+            self._sink.set_gauge("websocket_connections", self._websocket_connections)
+            self._sink.flush()
+
     def _increment(self, name: str, amount: int = 1) -> None:
         self._counters[name] += amount
+        if self._sink is not None:
+            self._sink.add(name, amount)
         prom_counter = self._prom_counters.get(name)
         if prom_counter is not None:
             prom_counter.inc(amount)
@@ -93,12 +111,16 @@ class Metrics:
     def websocket_connected(self) -> None:
         self._increment("websocket_connections_opened_total")
         self._websocket_connections += 1
+        if self._sink is not None:
+            self._sink.set_gauge("websocket_connections", self._websocket_connections)
         if self._prom_websocket_connections is not None:
             self._prom_websocket_connections.set(self._websocket_connections)
 
     def websocket_disconnected(self) -> None:
         self._increment("websocket_disconnections_total")
         self._websocket_connections = max(0, self._websocket_connections - 1)
+        if self._sink is not None:
+            self._sink.set_gauge("websocket_connections", self._websocket_connections)
         if self._prom_websocket_connections is not None:
             self._prom_websocket_connections.set(self._websocket_connections)
 
@@ -113,6 +135,8 @@ class Metrics:
 
     def set_live_matches(self, count: int) -> None:
         self._live_matches = count
+        if self._sink is not None:
+            self._sink.set_gauge("live_matches", count)
         if self._prom_live_matches is not None:
             self._prom_live_matches.set(count)
 

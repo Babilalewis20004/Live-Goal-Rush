@@ -2,6 +2,7 @@ import type {
   AuthResponse,
   Capabilities,
   CompetitionOut,
+  CompetitionSeasonsOut,
   DeviceOut,
   FavouritesOut,
   HeadToHeadOut,
@@ -140,6 +141,8 @@ export const api = {
   getPlayerStatistics: (id: number) => apiFetch<PlayerStatisticsOut>(`/api/v1/players/${id}/statistics`),
 
   getCapabilities: () => apiFetch<Capabilities>("/api/v1/capabilities"),
+  getCompetitionSeasons: (id: number) =>
+    apiFetch<CompetitionSeasonsOut>(`/api/v1/competitions/${id}/seasons`),
   getTeamFixtures: (id: number, page = 1, pageSize = 50) =>
     apiFetch<Page<MatchSummary>>(`/api/v1/teams/${id}/fixtures${query({ page, page_size: pageSize })}`),
   getTeamResults: (id: number, page = 1, pageSize = 50) =>
@@ -216,4 +219,14 @@ export const api = {
       method: "PATCH",
       body: { scope_type: scopeType, scope_id: scopeId, event_type: eventType, enabled },
     }),
+  /** Remove one explicit override so the scope + event falls back to its default. */
+  resetNotificationPreference: (
+    scopeType: NotificationScope,
+    scopeId: number | null,
+    eventType: RealtimeEventType,
+  ) =>
+    apiFetch<void>(
+      `/api/v1/notifications/preferences${query({ scope_type: scopeType, scope_id: scopeId ?? undefined, event_type: eventType })}`,
+      { method: "DELETE" },
+    ),
 }

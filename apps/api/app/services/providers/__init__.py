@@ -15,5 +15,6 @@ def get_provider() -> FootballDataProvider:
         return RealFootballDataProvider(
             base_url=settings.football_api_base_url,
             api_key=settings.football_api_key,
+            features=settings.football_api_features,
         )
     return MockFootballDataProvider()

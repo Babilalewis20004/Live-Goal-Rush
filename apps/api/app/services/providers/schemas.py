@@ -165,6 +165,8 @@ class ProviderCapabilities(BaseModel):
     standings: bool = True
     top_scorers: bool = False
     venues: bool = False
+    historical_seasons: bool = False
+    """Can supply standings / top scorers for *past* seasons on request."""
 
 
 class ProviderSearchResult(BaseModel):

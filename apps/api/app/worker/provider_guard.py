@@ -128,3 +128,15 @@ class GuardedProvider(FootballDataProvider):
         return await call_with_backoff(
             f"get_top_scorers({competition_id})", lambda: self._inner.get_top_scorers(competition_id)
         )
+
+    async def get_historical_standings(self, competition_id, season):
+        return await call_with_backoff(
+            f"get_historical_standings({competition_id},{season})",
+            lambda: self._inner.get_historical_standings(competition_id, season),
+        )
+
+    async def get_historical_top_scorers(self, competition_id, season):
+        return await call_with_backoff(
+            f"get_historical_top_scorers({competition_id},{season})",
+            lambda: self._inner.get_historical_top_scorers(competition_id, season),
+        )

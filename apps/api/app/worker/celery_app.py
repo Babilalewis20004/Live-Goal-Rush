@@ -12,6 +12,7 @@ separate codebase or dependency set.
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import beat_init, worker_process_init
 
 from app.core.config import settings
 
@@ -27,6 +28,33 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
 )
+
+
+def _enable_metrics(role: str) -> None:
+    """Push this process's counters to Redis so the API's /metrics can show
+    provider/sync activity (Phase 5). Best-effort: metrics must never stop a
+    worker from starting."""
+    import logging
+    import os
+
+    try:
+        from app.core.redis_client import get_sync_redis_service
+        from app.services.metrics import metrics
+
+        metrics.enable_aggregation(os.environ.get("METRICS_ROLE", role), get_sync_redis_service().raw)
+    except Exception:
+        logging.getLogger(__name__).warning("Cross-process metrics unavailable", exc_info=True)
+
+
+@worker_process_init.connect
+def _on_worker_process_init(**_kwargs) -> None:
+    _enable_metrics("worker")
+
+
+@beat_init.connect
+def _on_beat_init(**_kwargs) -> None:
+    _enable_metrics("scheduler")
+
 
 # Imported for their side effects: `tasks`/`notification_tasks` each
 # register their @celery_app.task functions, `schedule` sets

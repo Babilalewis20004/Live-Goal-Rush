@@ -240,16 +240,21 @@ def history_fixtures() -> list[dict]:
 # -- top scorers / standings -----------------------------------------------------------
 
 
-def top_scorers(competition_id: str) -> list[dict]:
+def top_scorers(competition_id: str, salt: str = "") -> list[dict]:
+    """`salt` varies the numbers for a past season (empty = the current one)."""
     teams = {row["team"]: row for row in STANDINGS.get(competition_id, [])}
     rows: list[dict] = []
     for pid, team_id in PLAYER_TEAM.items():
         if team_id not in teams:
             continue
         position = PLAYERS[pid]["position"]
-        base = {"Forward": 3 + h(pid, competition_id, "g", 7), "Midfielder": 1 + h(pid, competition_id, "g", 4)}.get(
-            position, h(pid, competition_id, "g", 3)
-        )
+        # The current season (empty salt) hashes exactly as it did before seasons
+        # existed, so its mock numbers are unchanged; a past season adds the label.
+        key = (pid, competition_id, *((salt,) if salt else ()))
+        base = {
+            "Forward": 3 + h(*key, "g", 7),
+            "Midfielder": 1 + h(*key, "g", 4),
+        }.get(position, h(*key, "g", 3))
         if base <= 0:
             continue
         rows.append(
@@ -257,13 +262,37 @@ def top_scorers(competition_id: str) -> list[dict]:
                 "player_id": pid,
                 "team_id": team_id,
                 "goals": base,
-                "assists": h(pid, competition_id, "a", 6),
-                "appearances": max(base, teams[team_id]["played"] - h(pid, competition_id, "app", 2)),
-                "penalties": h(pid, competition_id, "pen", base + 1) // 2 if position == "Forward" else 0,
+                "assists": h(*key, "a", 6),
+                "appearances": max(base, teams[team_id]["played"] - h(*key, "app", 2)),
+                "penalties": h(*key, "pen", base + 1) // 2 if position == "Forward" else 0,
             }
         )
     rows.sort(key=lambda r: (-r["goals"], -r["assists"], PLAYERS[r["player_id"]]["name"]))
     return rows[:10]
+
+
+def historical_table(competition_id: str, season: str) -> list[dict]:
+    """A plausible final table for a past season: same teams, numbers
+    regenerated deterministically from the season label. Mock data only."""
+    rows = []
+    for row in STANDINGS.get(competition_id, []):
+        played = row["played"] + 6  # a fuller season than the current partial one
+        won = h(season, competition_id, row["team"], "w", played + 1)
+        drawn = h(season, competition_id, row["team"], "d", played - won + 1)
+        lost = played - won - drawn
+        rows.append(
+            {
+                "team": row["team"],
+                "played": played,
+                "won": won,
+                "drawn": drawn,
+                "lost": lost,
+                "gf": won * 2 + drawn + h(season, row["team"], "gf", 6),
+                "ga": lost * 2 + drawn + h(season, row["team"], "ga", 6),
+            }
+        )
+    rows.sort(key=lambda r: (-(r["won"] * 3 + r["drawn"]), -(r["gf"] - r["ga"]), r["team"]))
+    return rows
 
 
 def standing_description(competition_id: str, position: int, size: int) -> str | None:
@@ -308,6 +337,7 @@ __all__ = [
     "player_statistics",
     "history_fixtures",
     "top_scorers",
+    "historical_table",
     "standing_description",
     "standing_form",
 ]

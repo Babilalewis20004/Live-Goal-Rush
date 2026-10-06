@@ -322,6 +322,7 @@ class MockFootballDataProvider(FootballDataProvider):
             standings=True,
             top_scorers=True,
             venues=True,
+            historical_seasons=True,
         )
 
     async def get_lineups(self, match_id: str) -> list[ProviderLineup]:
@@ -406,5 +407,41 @@ class MockFootballDataProvider(FootballDataProvider):
                 penalties=row["penalties"],
             )
             for row in mock_extras.top_scorers(competition_id)
+            if row["player_id"] in index
+        ]
+
+    async def get_historical_standings(self, competition_id: str, season: str) -> list[ProviderStandingRow]:
+        rows = mock_extras.historical_table(competition_id, season)
+        return [
+            ProviderStandingRow(
+                team=_team(row["team"]),
+                season=season,
+                description=mock_extras.standing_description(competition_id, position, len(rows)),
+                form=None,  # form is only meaningful for the current season
+                position=position,
+                played=row["played"],
+                won=row["won"],
+                drawn=row["drawn"],
+                lost=row["lost"],
+                goals_for=row["gf"],
+                goals_against=row["ga"],
+                points=row["won"] * 3 + row["drawn"],
+            )
+            for position, row in enumerate(rows, start=1)
+        ]
+
+    async def get_historical_top_scorers(self, competition_id: str, season: str) -> list[ProviderTopScorer]:
+        index = mock_extras.player_index()
+        return [
+            ProviderTopScorer(
+                player=_player_from_dict(index[row["player_id"]][0], row["team_id"]),
+                team=_team(row["team_id"]),
+                season=season,
+                goals=row["goals"],
+                assists=row["assists"],
+                appearances=row["appearances"],
+                penalties=row["penalties"],
+            )
+            for row in mock_extras.top_scorers(competition_id, salt=season)
             if row["player_id"] in index
         ]

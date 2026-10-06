@@ -84,12 +84,21 @@ async def test_engine() -> AsyncGenerator[AsyncEngine, None]:
     await engine.dispose()
 
 
+@pytest.fixture
+def fake_redis_server():
+    """The in-memory server behind `fake_redis`, for tests that also need a
+    *sync* client (the Celery worker's) looking at the same data."""
+    import fakeredis
+
+    return fakeredis.FakeServer()
+
+
 @pytest_asyncio.fixture
-async def fake_redis() -> AsyncGenerator[RedisService, None]:
+async def fake_redis(fake_redis_server) -> AsyncGenerator[RedisService, None]:
     """An isolated in-memory Redis (via fakeredis) per test -- exercises
     the real cache-aside code path (JSON encode/decode, TTLs, pub/sub)
     without requiring a real Redis server for the test suite."""
-    client = fakeredis_aioredis.FakeRedis(decode_responses=True)
+    client = fakeredis_aioredis.FakeRedis(server=fake_redis_server, decode_responses=True)
     yield RedisService(settings.redis_url, client=client)
     await client.aclose()
 

@@ -19,6 +19,17 @@ The free tier's competition/match coverage and rate limits are narrower
 than the mock dataset, so response mapping here is best-effort and may
 need adjusting to match the exact fields your plan returns.
 
+Phase 5 -- plan-gated features. Match events, lineups and match statistics
+exist only on football-data.org's paid plans, so they are OFF unless named in
+`FOOTBALL_API_FEATURES` (comma separated: `events,lineups,statistics`). Turn
+them on only when your plan includes them: `capabilities` then reports them,
+the sync layer starts calling them, and the UI stops saying "not available".
+The mapping for those three follows the v4 match resource's documented
+`goals` / `bookings` / `substitutions` / `homeTeam.lineup` / `.bench` /
+`.formation` / `.statistics` fields. It is covered by tests against
+payloads of that shape, but has NOT been exercised against a live paid
+account -- verify with your own key before relying on it.
+
 Phase 4 capability matrix for this provider (see `capabilities`): standings
 (with season, groups and the provider's form string), top scorers, team
 squads, player profiles and team venues are supported. Match events,
@@ -32,6 +43,9 @@ empty rather than guessed.
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import Iterable
 from datetime import date
 
 import httpx
@@ -40,8 +54,12 @@ from app.services.providers.base import FootballDataProvider
 from app.services.providers.schemas import (
     ProviderCapabilities,
     ProviderCompetition,
+    ProviderLineup,
+    ProviderLineupPlayer,
     ProviderMatch,
+    ProviderMatchEvent,
     ProviderPlayer,
+    ProviderTeamMatchStatistics,
     ProviderSearchResult,
     ProviderStandingRow,
     ProviderTeam,
@@ -58,6 +76,47 @@ _STATUS_MAP = {
     "SUSPENDED": "postponed",
     "CANCELLED": "cancelled",
 }
+
+
+logger = logging.getLogger(__name__)
+
+PLAN_FEATURES = frozenset({"events", "lineups", "statistics"})
+_DETAIL_TTL_SECONDS = 10.0
+_CARD_TYPES = {"YELLOW": "yellow_card", "RED": "red_card", "YELLOW_RED": "second_yellow"}
+_GOAL_TYPES = {"REGULAR": "goal", "OWN": "own_goal", "PENALTY": "penalty"}
+
+
+def parse_features(value: str | Iterable[str] | None) -> frozenset[str]:
+    """`"events, lineups"` -> {"events", "lineups"}; unknown names are
+    ignored (with a warning) so a typo can't silently enable nothing."""
+    if value is None:
+        return frozenset()
+    names = [v.strip().lower() for v in (value.split(",") if isinstance(value, str) else value)]
+    names = [n for n in names if n]
+    unknown = [n for n in names if n not in PLAN_FEATURES]
+    if unknown:
+        logger.warning("Ignoring unknown FOOTBALL_API_FEATURES entries: %s", ", ".join(unknown))
+    return frozenset(n for n in names if n in PLAN_FEATURES)
+
+
+def _season_year(season: str) -> str:
+    """"2024/25" -> "2024": football-data's `?season=` is the start year."""
+    return season[:4]
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> float | None:
+    """Possession may arrive as 54, "54" or "54%"."""
+    try:
+        return float(str(value).rstrip("%")) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _position(raw: str | None) -> str | None:
@@ -95,7 +154,7 @@ def _form(raw: str | None) -> str | None:
 
 
 class RealFootballDataProvider(FootballDataProvider):
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(self, base_url: str, api_key: str, features: str | Iterable[str] | None = None) -> None:
         if not base_url or not api_key:
             raise RuntimeError(
                 "RealFootballDataProvider requires FOOTBALL_API_BASE_URL and "
@@ -107,6 +166,8 @@ class RealFootballDataProvider(FootballDataProvider):
             headers={"X-Auth-Token": api_key},
             timeout=10.0,
         )
+        self._features = parse_features(features)
+        self._detail_cache: dict[str, tuple[float, dict]] = {}
 
     def _team(self, raw: dict) -> ProviderTeam:
         return ProviderTeam(
@@ -130,15 +191,16 @@ class RealFootballDataProvider(FootballDataProvider):
     @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
-            match_events=False,
-            lineups=False,
-            match_statistics=False,
-            player_statistics=False,
+            match_events="events" in self._features,
+            lineups="lineups" in self._features,
+            match_statistics="statistics" in self._features,
+            player_statistics=False,  # no per-player match statistics in the v4 API
             team_squads=True,
             player_profiles=True,
             standings=True,
             top_scorers=True,
             venues=True,
+            historical_seasons=True,
         )
 
     def _competition(self, raw: dict) -> ProviderCompetition:
@@ -167,13 +229,95 @@ class RealFootballDataProvider(FootballDataProvider):
             half_time_away_score=half_time.get("away"),
             venue=raw.get("venue"),
             minute=raw.get("minute"),
-            events=[],  # the free tier does not expose an event timeline
+            # the free tier has no event timeline; the paid `events` feature
+            # maps goals/bookings/substitutions when the payload has them
+            events=self._events(raw) if "events" in self._features else [],
         )
+
+    def _events(self, raw: dict) -> list[ProviderMatchEvent]:
+        teams = {str(raw[k]["id"]): self._team(raw[k]) for k in ("homeTeam", "awayTeam") if raw.get(k)}
+
+        def team_of(ref: dict | None) -> ProviderTeam | None:
+            # Event payloads reference teams by id/name only; resolve to the
+            # match's full team so a thin payload can't blank a stored team.
+            return teams.get(str(ref["id"])) if ref and ref.get("id") is not None else None
+
+        def person(ref: dict | None, team: ProviderTeam | None) -> ProviderPlayer | None:
+            return self._player(ref, team) if ref and ref.get("id") is not None else None
+
+        mid = raw["id"]
+        events: list[ProviderMatchEvent] = []
+        for goal in raw.get("goals") or []:
+            team = team_of(goal.get("team"))
+            scorer = person(goal.get("scorer"), team)
+            events.append(
+                ProviderMatchEvent(
+                    provider_id=f"fd{mid}-goal-{goal.get('minute')}-{goal.get('injuryTime') or 0}-{scorer.provider_id if scorer else 'x'}",
+                    event_type=_GOAL_TYPES.get(goal.get("type", "REGULAR"), "goal"),
+                    minute=goal.get("minute") or 0,
+                    extra_minute=goal.get("injuryTime"),
+                    team=team,
+                    player=scorer,
+                    assist_player=person(goal.get("assist"), team),
+                )
+            )
+        for booking in raw.get("bookings") or []:
+            team = team_of(booking.get("team"))
+            player = person(booking.get("player"), team)
+            events.append(
+                ProviderMatchEvent(
+                    provider_id=f"fd{mid}-card-{booking.get('minute')}-{player.provider_id if player else 'x'}-{booking.get('card')}",
+                    event_type=_CARD_TYPES.get(booking.get("card", "YELLOW"), "yellow_card"),
+                    minute=booking.get("minute") or 0,
+                    team=team,
+                    player=player,
+                )
+            )
+        for sub in raw.get("substitutions") or []:
+            team = team_of(sub.get("team"))
+            on, off = person(sub.get("playerIn"), team), person(sub.get("playerOut"), team)
+            events.append(
+                ProviderMatchEvent(
+                    provider_id=f"fd{mid}-sub-{sub.get('minute')}-{on.provider_id if on else 'x'}",
+                    event_type="substitution",
+                    minute=sub.get("minute") or 0,
+                    team=team,
+                    player=on,  # coming on (see MatchEventOut convention)
+                    assist_player=off,  # going off
+                )
+            )
+        events.sort(key=lambda e: (e.minute, e.extra_minute or 0))
+        return events
+
+    async def _detail(self, match_id: str) -> dict | None:
+        """The match resource (`/matches/{id}`) is where events, lineups and
+        statistics live; one live poll needs it for up to three features, so it
+        is cached for a few seconds instead of fetched three times."""
+        cached = self._detail_cache.get(match_id)
+        if cached and time.monotonic() - cached[0] < _DETAIL_TTL_SECONDS:
+            return cached[1]
+        resp = await self._client.get(f"/matches/{match_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        self._detail_cache[match_id] = (time.monotonic(), data)
+        if len(self._detail_cache) > 64:
+            oldest = min(self._detail_cache, key=lambda k: self._detail_cache[k][0])
+            self._detail_cache.pop(oldest, None)
+        return data
 
     async def get_live_matches(self) -> list[ProviderMatch]:
         resp = await self._client.get("/matches", params={"status": "LIVE"})
         resp.raise_for_status()
-        return [self._match(m) for m in resp.json().get("matches", [])]
+        raw_matches = resp.json().get("matches", [])
+        if "events" in self._features:
+            # List items carry no goals/bookings/substitutions: fetch each live
+            # match's detail, or the sync would see "no events" and clear the
+            # stored timeline.
+            detailed = [await self._detail(str(m["id"])) for m in raw_matches]
+            raw_matches = [d or m for d, m in zip(detailed, raw_matches, strict=True)]
+        return [self._match(m) for m in raw_matches]
 
     async def get_fixtures(self, on_date: date) -> list[ProviderMatch]:
         iso = on_date.isoformat()
@@ -182,11 +326,8 @@ class RealFootballDataProvider(FootballDataProvider):
         return [self._match(m) for m in resp.json().get("matches", [])]
 
     async def get_match(self, match_id: str) -> ProviderMatch | None:
-        resp = await self._client.get(f"/matches/{match_id}")
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return self._match(resp.json())
+        raw = await self._detail(match_id)
+        return self._match(raw) if raw is not None else None
 
     async def get_competitions(self) -> list[ProviderCompetition]:
         resp = await self._client.get("/competitions")
@@ -199,7 +340,16 @@ class RealFootballDataProvider(FootballDataProvider):
         return [self._match(m) for m in resp.json().get("matches", [])]
 
     async def get_standings(self, competition_id: str) -> list[ProviderStandingRow]:
-        resp = await self._client.get(f"/competitions/{competition_id}/standings")
+        return await self._standings(competition_id, None)
+
+    async def get_historical_standings(self, competition_id: str, season: str) -> list[ProviderStandingRow]:
+        return await self._standings(competition_id, season)
+
+    async def _standings(self, competition_id: str, season: str | None) -> list[ProviderStandingRow]:
+        params = {"season": _season_year(season)} if season else None
+        resp = await self._client.get(f"/competitions/{competition_id}/standings", params=params)
+        if season and resp.status_code in (400, 403, 404):
+            return []  # past seasons aren't available on every plan: "none", not a retry storm
         resp.raise_for_status()
         data = resp.json()
         season = _season_label(data.get("season"))
@@ -228,7 +378,16 @@ class RealFootballDataProvider(FootballDataProvider):
         return rows
 
     async def get_top_scorers(self, competition_id: str) -> list[ProviderTopScorer]:
-        resp = await self._client.get(f"/competitions/{competition_id}/scorers")
+        return await self._scorers(competition_id, None)
+
+    async def get_historical_top_scorers(self, competition_id: str, season: str) -> list[ProviderTopScorer]:
+        return await self._scorers(competition_id, season)
+
+    async def _scorers(self, competition_id: str, season: str | None) -> list[ProviderTopScorer]:
+        params = {"season": _season_year(season)} if season else None
+        resp = await self._client.get(f"/competitions/{competition_id}/scorers", params=params)
+        if season and resp.status_code in (400, 403, 404):
+            return []
         resp.raise_for_status()
         data = resp.json()
         season = _season_label(data.get("season"))
@@ -283,6 +442,60 @@ class RealFootballDataProvider(FootballDataProvider):
         # integration would query /teams?name= and /competitions and filter
         # client-side, or upgrade to a plan that supports search directly.
         return ProviderSearchResult(teams=[], competitions=[], players=[])
+
+    async def get_lineups(self, match_id: str) -> list[ProviderLineup]:
+        if "lineups" not in self._features:
+            return []
+        raw = await self._detail(match_id)
+        if raw is None:
+            return []
+        lineups: list[ProviderLineup] = []
+        for side in ("homeTeam", "awayTeam"):
+            team_raw = raw.get(side) or {}
+            starters, bench = team_raw.get("lineup") or [], team_raw.get("bench") or []
+            if not starters and not bench:
+                continue  # not published (yet)
+            team = self._team(team_raw)
+            players = [
+                ProviderLineupPlayer(
+                    player=self._player(p, team),
+                    is_starter=is_starter,
+                    position=_position(p.get("position")),
+                    shirt_number=p.get("shirtNumber"),
+                )
+                for is_starter, group in ((True, starters), (False, bench))
+                for p in group
+            ]
+            lineups.append(ProviderLineup(team=team, formation=team_raw.get("formation"), players=players))
+        return lineups
+
+    async def get_match_statistics(self, match_id: str) -> list[ProviderTeamMatchStatistics]:
+        if "statistics" not in self._features:
+            return []
+        raw = await self._detail(match_id)
+        if raw is None:
+            return []
+        result: list[ProviderTeamMatchStatistics] = []
+        for side in ("homeTeam", "awayTeam"):
+            team_raw = raw.get(side) or {}
+            stats = team_raw.get("statistics")
+            if not stats:
+                continue
+            result.append(
+                ProviderTeamMatchStatistics(
+                    team=self._team(team_raw),
+                    possession=_as_float(stats.get("ball_possession")),
+                    shots=_as_int(stats.get("shots")),
+                    shots_on_target=_as_int(stats.get("shots_on_goal")),
+                    corners=_as_int(stats.get("corner_kicks")),
+                    fouls=_as_int(stats.get("fouls")),
+                    offsides=_as_int(stats.get("offsides")),
+                    yellow_cards=_as_int(stats.get("yellow_cards")),
+                    red_cards=_as_int(stats.get("red_cards")),
+                    # pass accuracy / xG are not part of this resource: stay unsupplied
+                )
+            )
+        return result
 
     async def aclose(self) -> None:
         await self._client.aclose()

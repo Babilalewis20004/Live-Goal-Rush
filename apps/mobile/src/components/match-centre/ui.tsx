@@ -114,7 +114,7 @@ export function StaleBanner({
   if (!isLive || status === "open" || status === "connecting") return null
   const ago = formatAgo(lastUpdatedAt, now)
   return (
-    <View style={styles.banner} accessibilityRole="alert">
+    <View style={styles.banner} accessible accessibilityRole="alert">
       <Text style={styles.bannerTitle}>Connection lost</Text>
       <Text style={styles.bannerBody}>
         Showing last known match state{ago ? `\nUpdated ${ago}` : ""}

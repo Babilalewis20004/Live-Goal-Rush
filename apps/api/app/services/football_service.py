@@ -16,8 +16,9 @@ from app.models.match import Match
 from app.models.match_event import MatchEvent
 from app.models.player import Player
 from app.models.standing import Standing
+from app.models.statistics import PlayerSeasonStatistic
 from app.models.team import Team
-from app.schemas.competition import CompetitionOut
+from app.schemas.competition import CompetitionOut, CompetitionSeasonsOut
 from app.schemas.match import MatchDetail, MatchEventOut, MatchSummary
 from app.schemas.player import PlayerOut
 from app.schemas.search import SearchResults
@@ -27,7 +28,8 @@ from app.services.cache import CacheAside
 from app.services.pagination import paginate
 from app.services.providers.base import FootballDataProvider
 from app.services.providers.schemas import ProviderMatch, ProviderMatchEvent
-from app.services.season import current_season_label
+from app.services.season import current_season_label, is_requestable_past_season
+from app.services.sync_requests import request_sync_once
 from app.services.upsert import upsert_by_provider_id, upsert_by_unique_fields
 
 logger = logging.getLogger(__name__)
@@ -252,12 +254,16 @@ class FootballService:
         )
         await self.db.flush()
 
-    async def sync_standings(self, competition: Competition) -> None:
-        """Persist a competition's current table. Standings are no longer
-        fetched live on every request (see `get_standings` below) -- the
-        worker calls this alongside fixture syncing."""
-        provider_rows = await self.provider.get_standings(competition.provider_id)
-        default_season = current_season_label()
+    async def sync_standings(self, competition: Competition, season: str | None = None) -> None:
+        """Persist a competition's table. Standings are no longer fetched
+        live on every request (see `get_standings` below) -- the worker calls
+        this alongside fixture syncing. `season` (Phase 5) syncs a *past*
+        season through the provider's historical method instead."""
+        if season is None:
+            provider_rows = await self.provider.get_standings(competition.provider_id)
+        else:
+            provider_rows = await self.provider.get_historical_standings(competition.provider_id, season)
+        default_season = season or current_season_label()
         for row in provider_rows:
             team = await self._sync_team(row.team)
             await upsert_by_unique_fields(
@@ -458,6 +464,8 @@ class FootballService:
                 .order_by(Standing.group_name, Standing.position)
             )
             rows = (await self.db.execute(stmt)).scalars().all()
+            if not rows and season is not None:
+                await self.request_season_sync(competition, season)
             return [StandingEntry.model_validate(row) for row in rows]
 
         if self.cache is None:
@@ -470,6 +478,46 @@ class FootballService:
         if group is not None:
             entries = [e for e in entries if e.group_name == group]
         return entries
+
+    async def request_season_sync(self, competition: Competition, season: str) -> bool:
+        """A client asked for a season we haven't stored. If the provider can
+        supply past seasons and the label is sane, queue a one-off background
+        sync (debounced + budgeted like every on-demand sync); the answer for
+        now is empty and the client re-checks."""
+        if not self.provider.capabilities.historical_seasons or not is_requestable_past_season(season):
+            return False
+        from app.services.team_player_service import _enqueue_season_sync
+
+        return await request_sync_once(
+            self.cache,
+            "season",
+            f"{competition.id}:{season}",
+            lambda: _enqueue_season_sync(competition.id, season),
+        )
+
+    async def get_competition_seasons(self, competition_id: int) -> CompetitionSeasonsOut:
+        async def _load() -> CompetitionSeasonsOut:
+            await self._get_competition_by_id(competition_id)  # only on a cache miss; also the 404
+            standing_seasons = select(Standing.season).where(Standing.competition_id == competition_id)
+            scorer_seasons = select(PlayerSeasonStatistic.season).where(
+                PlayerSeasonStatistic.competition_id == competition_id
+            )
+            rows = (await self.db.execute(standing_seasons.union(scorer_seasons))).scalars().all()
+            seasons = sorted(set(rows), reverse=True)
+            return CompetitionSeasonsOut(
+                current=seasons[0] if seasons else None,
+                seasons=seasons,
+                historical_supported=self.provider.capabilities.historical_seasons,
+            )
+
+        if self.cache is None:
+            return await _load()
+        return await self.cache.get_or_set_model(
+            RedisKeys.competition_seasons(competition_id),
+            CompetitionSeasonsOut,
+            _load,
+            ttl_seconds=settings.redis_default_ttl_seconds,
+        )
 
     # -- teams ------------------------------------------------------------
 

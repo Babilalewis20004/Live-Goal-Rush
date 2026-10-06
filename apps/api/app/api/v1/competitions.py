@@ -4,11 +4,12 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import FootballServiceDep, PaginationDep, TeamPlayerServiceDep
 from app.schemas.common import Page
-from app.schemas.competition import CompetitionOut
+from app.schemas.competition import CompetitionOut, CompetitionSeasonsOut
 from app.schemas.match import MatchSummary
 from app.schemas.standing import StandingEntry
 from app.schemas.statistics import TopScorersOut
 from app.services.football_service import NotFoundError
+from app.services.season import SEASON_LABEL_PATTERN
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ async def get_competition_fixtures(
 async def get_standings(
     competition_id: int,
     service: FootballServiceDep,
-    season: Annotated[str | None, Query(max_length=16)] = None,
+    season: Annotated[str | None, Query(pattern=SEASON_LABEL_PATTERN)] = None,
     group: Annotated[str | None, Query(max_length=64)] = None,
 ) -> list[StandingEntry]:
     """Defaults to the latest stored season; `group` narrows a group-stage
@@ -66,9 +67,18 @@ async def get_standings(
 async def get_top_scorers(
     competition_id: int,
     service: TeamPlayerServiceDep,
-    season: Annotated[str | None, Query(max_length=16)] = None,
+    season: Annotated[str | None, Query(pattern=SEASON_LABEL_PATTERN)] = None,
 ) -> TopScorersOut:
     try:
         return await service.get_top_scorers(competition_id, season)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Competition not found") from exc
+
+
+@router.get("/{competition_id}/seasons", response_model=CompetitionSeasonsOut)
+async def get_competition_seasons(competition_id: int, service: FootballServiceDep) -> CompetitionSeasonsOut:
+    """Seasons we hold data for (newest first) -- feeds the season selector."""
+    try:
+        return await service.get_competition_seasons(competition_id)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="Competition not found") from exc

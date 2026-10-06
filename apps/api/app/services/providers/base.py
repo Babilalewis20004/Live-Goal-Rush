@@ -82,3 +82,10 @@ class FootballDataProvider(ABC):
 
     async def get_top_scorers(self, competition_id: str) -> list[ProviderTopScorer]:
         return []
+
+    async def get_historical_standings(self, competition_id: str, season: str) -> list[ProviderStandingRow]:
+        """Standings for a past `season` label (Phase 5). Default: unsupported."""
+        return []
+
+    async def get_historical_top_scorers(self, competition_id: str, season: str) -> list[ProviderTopScorer]:
+        return []

@@ -57,7 +57,7 @@ class TeamPlayerService:
         self.db = db
         self.provider = provider
         self.cache = cache
-        self.football = football or FootballService(db=db, provider=provider)
+        self.football = football or FootballService(db=db, provider=provider, cache=cache)
 
     # -- syncing (provider -> database) ----------------------------------------
 
@@ -91,11 +91,14 @@ class TeamPlayerService:
             return None
         return await self.football._sync_player(provider_player, None, profile=True)
 
-    async def sync_top_scorers(self, competition: Competition) -> int:
+    async def sync_top_scorers(self, competition: Competition, season: str | None = None) -> int:
         if not self.provider.capabilities.top_scorers:
             return 0
-        rows = await self.provider.get_top_scorers(competition.provider_id)
-        default_season = current_season_label()
+        if season is None:
+            rows = await self.provider.get_top_scorers(competition.provider_id)
+        else:
+            rows = await self.provider.get_historical_top_scorers(competition.provider_id, season)
+        default_season = season or current_season_label()
         for row in rows:
             team = await self.football._sync_team(row.team) if row.team else None
             player = await self.football._sync_player(row.player, team.id if team else None)
@@ -292,6 +295,19 @@ class TeamPlayerService:
             ).scalar_one_or_none()
             if competition is None:  # only reached on a cache miss
                 raise NotFoundError(f"Competition {competition_id} not found")
+            if season is not None:
+                stored = (
+                    await self.db.execute(
+                        select(func.count())
+                        .select_from(PlayerSeasonStatistic)
+                        .where(
+                            PlayerSeasonStatistic.competition_id == competition_id,
+                            PlayerSeasonStatistic.season == season,
+                        )
+                    )
+                ).scalar_one()
+                if stored == 0:
+                    await self.football.request_season_sync(competition, season)
             resolved = season or (
                 await self.db.execute(
                     select(func.max(PlayerSeasonStatistic.season)).where(
@@ -353,3 +369,9 @@ def _enqueue_player_sync(player_provider_id: str) -> None:
     from app.worker.tasks import sync_player
 
     sync_player.delay(player_provider_id)
+
+
+def _enqueue_season_sync(competition_id: int, season: str) -> None:
+    from app.worker.tasks import sync_competition_season
+
+    sync_competition_season.delay(competition_id, season)

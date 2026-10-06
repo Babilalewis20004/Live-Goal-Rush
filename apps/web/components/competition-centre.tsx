@@ -8,8 +8,17 @@ import { TabPanel, Tabs, type TabDef } from "@/components/ui/tabs"
 import { MatchCard } from "@/components/match-card"
 import { TeamBadge } from "@/components/team-badge"
 import { StandingsTable } from "@/components/match-centre/standings-table"
+import { SeasonSelect } from "@/components/match-centre/season-select"
 import { TopScorers } from "@/components/match-centre/top-scorers"
-import type { Capabilities, MatchSummary, StandingEntry, TeamOut, TopScorersOut } from "@/types/api"
+import { useSeasonView } from "@/hooks/use-season-view"
+import type {
+  Capabilities,
+  CompetitionSeasonsOut,
+  MatchSummary,
+  StandingEntry,
+  TeamOut,
+  TopScorersOut,
+} from "@/types/api"
 
 type TabId = "standings" | "fixtures" | "results" | "scorers" | "teams"
 
@@ -25,6 +34,8 @@ const ID_PREFIX = "competition"
 const CARD = "overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-md"
 
 export interface CompetitionCentreData {
+  competitionId: number
+  seasons: CompetitionSeasonsOut | null
   standings: StandingEntry[] | null
   fixtures: MatchSummary[]
   results: MatchSummary[]
@@ -45,7 +56,13 @@ function MatchList({ matches, empty }: { matches: MatchSummary[]; empty: string 
 
 export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
   const [tab, setTab] = useState<TabId>("standings")
-  const { standings, fixtures, results, topScorers, capabilities } = data
+  const { competitionId, seasons, fixtures, results, capabilities } = data
+  const view = useSeasonView(
+    competitionId,
+    { standings: data.standings, topScorers: data.topScorers },
+    seasons,
+  )
+  const { standings, topScorers } = view
 
   // Teams come from the table (every team has a row); no separate endpoint.
   const teams: TeamOut[] = []
@@ -63,8 +80,15 @@ export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
       <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Competition sections" />
 
       <TabPanel idPrefix={ID_PREFIX} id="standings" active={tab === "standings"}>
-        {standings && standings.length > 0 ? (
+        <SeasonSelect info={seasons} value={view.season} onChange={view.select} />
+        {view.loading ? (
+          <p role="status" className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-10 text-center text-sm text-white/50">
+            Loading season {view.season}… this can take a few seconds the first time.
+          </p>
+        ) : standings && standings.length > 0 ? (
           <StandingsTable standings={standings} />
+        ) : view.gaveUp ? (
+          <EmptyState message={`No table is available for ${view.season} from the data provider.`} />
         ) : (
           <FeatureState feature="standings" capabilities={capabilities} pendingMessage="No table is available yet." />
         )}
@@ -79,7 +103,12 @@ export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
       </TabPanel>
 
       <TabPanel idPrefix={ID_PREFIX} id="scorers" active={tab === "scorers"}>
-        {topScorers && topScorers.scorers.length > 0 ? (
+        <SeasonSelect info={seasons} value={view.season} onChange={view.select} />
+        {view.loading ? (
+          <p role="status" className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-10 text-center text-sm text-white/50">
+            Loading season {view.season}…
+          </p>
+        ) : topScorers && topScorers.scorers.length > 0 ? (
           <TopScorers data={topScorers} />
         ) : (
           <FeatureState

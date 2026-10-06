@@ -91,6 +91,12 @@ one API contract.
   event-driven cache invalidation; all new sync is idempotent
 - Full details: `docs/architecture/match-centre.md`
 
+**Phase 5** — per-favourite notification overrides (Default/On/Off per
+event, with a global mute that wins), a season selector with on-demand history,
+cross-process Prometheus metrics (API + worker + scheduler in one `/metrics`), a
+React Native test harness (`npm test` in `apps/mobile`), and plan-gated paid
+provider features (`FOOTBALL_API_FEATURES`). Details: `docs/architecture/phase5.md`
+
 ## Architecture
 
 ```
@@ -337,19 +343,11 @@ not to need a rewrite for these:
 - Real transactional email delivery (password reset currently logs the
   link server-side and returns it in dev-only responses — see
   `docs/architecture/auth.md`)
-- Cross-process metrics aggregation (Prometheus multiprocess mode) instead
-  of per-process-only `/metrics`
 - Betting odds, advertisements, subscriptions/payments
 - Social features, AI features, chat
 - A real automated type-sharing pipeline between the FastAPI schemas and
   the TypeScript clients (e.g. `openapi-typescript`), replacing the
   hand-synced `packages/shared/types.ts`
-- A React Native test harness for the mobile hooks (currently verified by
-  typecheck/lint + manual testing, matching web's hook contract by
-  construction — see Known limitations)
-- Per-team/competition/match notification preference overrides in the web/
-  mobile UI (the API already supports any scope; the bundled settings
-  screens only expose the GLOBAL-scope defaults)
 
 ## Known limitations
 
@@ -377,13 +375,9 @@ not to need a rewrite for these:
 - The mobile app's web-export target (used only for automated verification
   in this environment, not a real target platform) shows a React hydration
   console warning on the search screen; iOS/Android are unaffected.
-- No automated React Native component/hook tests (Phase 2 added Vitest
-  coverage for the web app's equivalent logic; the mobile hooks mirror it
-  by construction and are covered by typecheck/lint + manual testing).
-- Per-process metrics only (`/metrics` on the API process reports its own
-  cache/WebSocket counters; the worker's provider/sync counters are
-  visible in its logs, not yet aggregated into one scrape target) — see
-  `app/services/metrics.py`'s docstring and the Roadmap.
+- Mobile has component/hook tests (Phase 5) but no on-device/E2E automation.
+- Metrics are aggregated across processes via Redis (Phase 5); there is no
+  bundled Prometheus/Grafana, and `/metrics` is unauthenticated like `/health`.
 - Mobile push notifications require this Expo project to be linked to an
   EAS project (`expo.dev` account, `eas init`) before a real push token
   can be obtained — an external, one-time setup step outside this
@@ -394,10 +388,9 @@ not to need a rewrite for these:
   environments (see `docs/architecture/auth.md`), matching this repo's
   existing "mock provider" approach to infrastructure this environment
   doesn't have credentials for.
-- Notification preference UI (web + mobile) only exposes GLOBAL-scope
-  toggles for the five default-on event types; per-favourite overrides are
-  supported by the API (`scope_type=team|competition|match`) but not yet
-  surfaced in either client's settings screen.
+- The paid-plan football-data.org mapping (`FOOTBALL_API_FEATURES`) has only
+  been tested against payloads shaped like the documented API, not a live
+  paid account (`docs/architecture/phase5.md` §5).
 - The mock provider's simulated live-match progression (real time, ~2s per
   simulated minute by default) means kickoff times reported for "live"
   fixtures drift from wall-clock reality the longer a process runs — a

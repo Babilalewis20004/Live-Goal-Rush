@@ -44,6 +44,10 @@ unversioned, outside `/api/v1` (see `deployment/docker.md` and
 | `GET /api/v1/teams/{team_id}/statistics`      | *(Phase 4)* Per competition+season table figures |
 | `GET /api/v1/teams/{team_id}/form`            | *(Phase 4)* Last 5 results (`scope=overall\|home\|away`) |
 
+`GET /api/v1/competitions/{id}/seasons` *(Phase 5)* lists stored seasons for the
+season selector; `DELETE /api/v1/notifications/preferences` *(Phase 5)* resets one
+per-favourite override. See `phase5.md`.
+
 ### Players *(Phase 4)*
 
 | Method & path                                   | Description                                   |

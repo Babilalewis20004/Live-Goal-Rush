@@ -86,6 +86,11 @@ class RedisService:
             logger.warning("Redis health check failed", exc_info=True)
             return False
 
+    @property
+    def raw(self) -> redis_async.Redis:
+        """The underlying async client (see `SyncRedisService.raw`)."""
+        return self._client
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -127,6 +132,12 @@ class SyncRedisService:
         except Exception:
             logger.warning("Redis health check failed", exc_info=True)
             return False
+
+    @property
+    def raw(self) -> redis_sync.Redis:
+        """The underlying client, for the metrics sink's hash/pipeline
+        operations (which don't fit this wrapper's JSON get/set API)."""
+        return self._client
 
 
 @lru_cache

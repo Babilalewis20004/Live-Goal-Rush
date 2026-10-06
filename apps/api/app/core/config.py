@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     football_data_provider: str = "mock"  # "mock" | "real"
     football_api_base_url: str = ""
     football_api_key: str = ""
+    # Phase 5: paid-plan features of the real provider, comma separated from
+    # {events, lineups, statistics}. Empty = free tier (none of them).
+    football_api_features: str = ""
 
     cors_origins: str = "http://localhost:3000"
 

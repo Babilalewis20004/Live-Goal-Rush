@@ -1,7 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
@@ -9,7 +11,7 @@ from sqlalchemy import text
 from app.api.v1.router import api_router
 from app.api.v1.websocket import router as websocket_router
 from app.core.config import settings
-from app.core.redis_client import get_redis_service
+from app.core.redis_client import RedisService, get_redis_service
 from app.db.session import AsyncSessionLocal
 from app.services.providers import get_provider
 from app.services.seed import seed_database
@@ -48,6 +50,14 @@ async def lifespan(app: FastAPI):
         await seed_database()
     except Exception:
         logger.exception("Startup seeding failed; continuing without a pre-warmed database")
+
+    try:
+        from app.core.redis_client import get_sync_redis_service
+        from app.services.metrics import metrics
+
+        metrics.enable_aggregation("api", get_sync_redis_service().raw)
+    except Exception:
+        logger.warning("Cross-process metrics unavailable; /metrics will show this process only", exc_info=True)
 
     bridge = PubSubBridge(redis=get_redis_service(), manager=manager)
     bridge.start()
@@ -107,10 +117,23 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/metrics", tags=["observability"])
-    async def metrics_endpoint() -> PlainTextResponse:
-        """Basic metrics (Phase 2 §27). Reports this process's counters --
-        see app/services/metrics.py's docstring for why the worker/
-        scheduler's counters aren't aggregated in here too."""
+    async def metrics_endpoint(redis: Annotated[RedisService, Depends(get_redis_service)]) -> PlainTextResponse:
+        """Metrics (Phase 2 §27, cross-process since Phase 5): the API,
+        worker and scheduler all push their counters to Redis, and this renders
+        them together, one series per `role` label. If Redis can't be read it
+        falls back to this process's own counters, as before."""
+        try:
+            from app.services.metrics import metrics as app_metrics
+            from app.services.metrics_aggregation import read_aggregate_async, render_prometheus
+
+            app_metrics.flush()  # make this process's latest numbers visible first
+            counters, gauges = await read_aggregate_async(redis.raw)
+            if counters or gauges:
+                return PlainTextResponse(
+                    render_prometheus(counters, gauges), media_type="text/plain; version=0.0.4; charset=utf-8"
+                )
+        except Exception:
+            logger.warning("Aggregated metrics unavailable; reporting this process only", exc_info=True)
         try:
             from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 

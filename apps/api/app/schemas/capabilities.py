@@ -11,6 +11,7 @@ class CapabilitiesOut(BaseModel):
     standings: bool
     top_scorers: bool
     venues: bool
+    historical_seasons: bool = False
     head_to_head: bool = True
     """Derived from stored results, so always available (may be empty)."""
     form: bool = True
