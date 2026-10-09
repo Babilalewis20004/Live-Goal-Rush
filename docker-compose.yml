@@ -27,18 +27,48 @@ services:
       timeout: 5s
       retries: 10
 
+  # Phase 6: S3-compatible object storage for uploaded images (local stand-in for S3 / R2).
+  # (MinIO no longer publishes its community image on Docker Hub; this is the Chainguard build of MinIO.
+  # It is distroless -- no shell, no `mc` -- so there is no container healthcheck; the API creates the
+  # bucket itself, on start-up and again on first upload if needed. Local development only.)
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    user: "0:0"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-livepitch}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-livepitch-secret}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+
+  # Phase 6: exposes Redis internals (memory, clients, hit rate) to Prometheus.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
   api:
+    # One image serves the API, the Celery worker and the scheduler (they differ only in command), so it is built
+    # once and the three can never run different code.
+    image: ${API_IMAGE:-livepitch-api:local}
     build:
       context: ./apps/api
     environment: &api_env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-football}:${POSTGRES_PASSWORD:-football}@postgres:5432/${POSTGRES_DB:-football_livescore}
       REDIS_URL: redis://redis:6379/0
-      FOOTBALL_DATA_PROVIDER: ${FOOTBALL_DATA_PROVIDER:-mock}
+      FOOTBALL_DATA_PROVIDER: ${FOOTBALL_DATA_PROVIDER:-api-football}
       FOOTBALL_API_BASE_URL: ${FOOTBALL_API_BASE_URL:-}
       FOOTBALL_API_KEY: ${FOOTBALL_API_KEY:-}
       FOOTBALL_API_FEATURES: ${FOOTBALL_API_FEATURES:-}
+      FOOTBALL_API_LEAGUE_IDS: ${FOOTBALL_API_LEAGUE_IDS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      LIVE_POLL_INTERVAL_SECONDS: ${LIVE_POLL_INTERVAL_SECONDS:-15}
+      LIVE_POLL_INTERVAL_SECONDS: ${LIVE_POLL_INTERVAL_SECONDS:-30}
       UPCOMING_POLL_INTERVAL_SECONDS: ${UPCOMING_POLL_INTERVAL_SECONDS:-60}
       POST_MATCH_SYNC_INTERVAL_SECONDS: ${POST_MATCH_SYNC_INTERVAL_SECONDS:-60}
       REDIS_LIVE_MATCH_TTL_SECONDS: ${REDIS_LIVE_MATCH_TTL_SECONDS:-30}
@@ -46,13 +76,67 @@ services:
       REDIS_STATIC_TTL_SECONDS: ${REDIS_STATIC_TTL_SECONDS:-3600}
       WEBSOCKET_HEARTBEAT_SECONDS: ${WEBSOCKET_HEARTBEAT_SECONDS:-30}
       WEBSOCKET_MAX_CONNECTIONS: ${WEBSOCKET_MAX_CONNECTIONS:-1000}
+      WEBSOCKET_MAX_CONNECTIONS_PER_IP: ${WEBSOCKET_MAX_CONNECTIONS_PER_IP:-25}
+      WEBSOCKET_SEND_TIMEOUT_SECONDS: ${WEBSOCKET_SEND_TIMEOUT_SECONDS:-5}
       SYNC_MAX_RETRIES: ${SYNC_MAX_RETRIES:-3}
       SYNC_BACKOFF_SECONDS: ${SYNC_BACKOFF_SECONDS:-5}
-      MOCK_LIVE_SECONDS_PER_MINUTE: ${MOCK_LIVE_SECONDS_PER_MINUTE:-2.0}
       # -- Auth + push (Phase 3) -- shared by api/worker/scheduler via this
       # anchor, since the worker is what actually sends notifications and
       # needs the same VAPID keys as the API.
       JWT_SECRET: ${JWT_SECRET:-dev-insecure-secret-change-me-before-deploying-anywhere-real}
+      # -- Discovery (Phase 5): the web container's server-side calls arrive from
+      # the Docker network; believe the visitor address it forwards so per-client
+      # rate limits are per visitor, not one shared bucket for the whole site.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+      # -- Media + logging (Phase 6) -- shared with the worker, which also serves no images
+      # but must agree on settings that change what is stored.
+      MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND:-s3}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_BUCKET: ${S3_BUCKET:-livepitch-media}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-livepitch}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-livepitch-secret}
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-}
+      # The URL clients use to reach the API (image links are built from it).
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-5242880}
+      # -- Analytics, predictions, billing (Phase 6b). The default `test` billing provider is
+      # refused when ENVIRONMENT=production; set BILLING_PROVIDER=stripe with real secrets there.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-test}
+      BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-dev-only-webhook-secret}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      BILLING_SUCCESS_URL: ${BILLING_SUCCESS_URL:-http://localhost:3000/premium?checkout=success}
+      BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-http://localhost:3000/premium?checkout=cancelled}
+      BILLING_GRACE_DAYS: ${BILLING_GRACE_DAYS:-3}
+      ADS_ENABLED: ${ADS_ENABLED:-false}
+      ANALYTICS_CACHE_TTL_SECONDS: ${ANALYTICS_CACHE_TTL_SECONDS:-900}
+      PREDICTION_CACHE_TTL_SECONDS: ${PREDICTION_CACHE_TTL_SECONDS:-300}
+      PREDICTION_HORIZON_HOURS: ${PREDICTION_HORIZON_HOURS:-72}
+      # -- Production hardening (Phase 7). Pool sizes are PER PROCESS: connections used ~ (pool + overflow) x
+      # (uvicorn workers + celery processes); keep that under Postgres' max_connections (docs/operations/capacity.md).
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-10}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-15000}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      APP_VERSION: ${APP_VERSION:-2.1.0}
+      GIT_SHA: ${GIT_SHA:-}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-LivePitch <no-reply@example.com>}
+      PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-http://localhost:3000}
+      SEARCH_RESULTS_CACHE_TTL_SECONDS: ${SEARCH_RESULTS_CACHE_TTL_SECONDS:-30}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: api
+      ARTICLE_IMAGE_ALLOWED_HOSTS: ${ARTICLE_IMAGE_ALLOWED_HOSTS:-}
+      CONTENT_NOTIFICATION_DAILY_CAP: ${CONTENT_NOTIFICATION_DAILY_CAP:-3}
+      TRENDING_WINDOW_HOURS: ${TRENDING_WINDOW_HOURS:-24}
+      TRENDING_HALF_LIFE_HOURS: ${TRENDING_HALF_LIFE_HOURS:-6}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
@@ -61,6 +145,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
     ports:
       - "8000:8000"
     healthcheck:
@@ -69,19 +155,26 @@ services:
       # uvicorn starts) has completed, which is what worker/scheduler
       # below actually wait on -- they must not query tables that don't
       # exist yet.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
 
   worker:
-    build:
-      context: ./apps/api
+    image: ${API_IMAGE:-livepitch-api:local}
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    healthcheck:
+      # The image's HEALTHCHECK probes the HTTP API, which a worker does not run.
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d celery@$$HOSTNAME -t 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     environment:
       <<: *api_env
       METRICS_ROLE: worker
+      SERVICE_NAME: worker
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,12 +184,14 @@ services:
         condition: service_healthy
 
   scheduler:
-    build:
-      context: ./apps/api
-    command: celery -A app.worker.celery_app beat --loglevel=info
+    image: ${API_IMAGE:-livepitch-api:local}
+    command: celery -A app.worker.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    healthcheck:
+      disable: true  # beat serves no port; its liveness is the Celery queue draining (see monitoring/prometheus/alerts.yml)
     environment:
       <<: *api_env
       METRICS_ROLE: scheduler
+      SERVICE_NAME: scheduler
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,8 +210,14 @@ services:
         # web container itself, not the api container. Override with
         # NEXT_PUBLIC_API_URL_DOCKER if you need something else.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
+        # What the browser calls for client-side requests (search suggestions,
+        # view tracking, login, the editor) -- the host-published API port.
+        NEXT_PUBLIC_BROWSER_API_URL: ${NEXT_PUBLIC_BROWSER_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL_DOCKER:-http://api:8000}
+      NEXT_PUBLIC_BROWSER_API_URL: ${NEXT_PUBLIC_BROWSER_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
       # Unlike the server-side fetches above, the browser opens the
       # WebSocket directly, from the host machine -- so this must resolve
       # on the host network (localhost), not the Docker network.
@@ -126,6 +227,42 @@ services:
     ports:
       - "3000:3000"
 
+  # Phase 6: metrics and dashboards.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - api
+      - redis-exporter
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Change this outside local development.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
   redis_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:

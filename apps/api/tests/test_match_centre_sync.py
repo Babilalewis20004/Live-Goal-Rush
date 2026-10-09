@@ -13,7 +13,7 @@ from app.models.statistics import MatchStatistic, PlayerMatchStatistic
 from app.services.football_service import FootballService
 from app.services.match_centre_service import MatchCentreService
 from app.services.providers.base import FootballDataProvider
-from app.services.providers.mock_provider import MockFootballDataProvider
+from tests.fakes.mock_provider import MockFootballDataProvider
 from app.services.providers.real_provider import RealFootballDataProvider
 from app.services.providers.schemas import ProviderCapabilities
 from app.worker.provider_guard import GuardedProvider, ProviderUnavailableError

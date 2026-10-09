@@ -39,6 +39,12 @@
         {
           "color": "#34d399"
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "LivePitch needs access to your photos so you can add images to articles you write."
+        }
       ]
     ],
     "experiments": {

@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 _NEAR_KICKOFF_WINDOW = timedelta(minutes=15)
 _POST_MATCH_WINDOW = timedelta(minutes=30)
+# sync_live_matches only polls the provider when a match could be in play: one is
+# live/halftime, or one is scheduled to have started within the last few hours
+# (a late status flip) or to start shortly.
+_LIVE_LEAD_WINDOW = timedelta(minutes=20)
+_LIVE_TRAIL_WINDOW = timedelta(hours=3)
 
 
 # Events that only refresh an open match-centre screen. They are published
@@ -70,6 +75,17 @@ def _invalidate_after_finish(redis, match: MatchDetail) -> None:
         RedisKeys.team_form(match.away_team.id, "away"),
         RedisKeys.team_statistics(match.home_team.id),
         RedisKeys.team_statistics(match.away_team.id),
+        *[
+            RedisKeys.team_analytics(team_id, scope, window)
+            for team_id in (match.home_team.id, match.away_team.id)
+            for scope in ("overall", "home", "away")
+            for window in (5, 10, 20, 38)
+        ],
+        *[
+            RedisKeys.team_form(team_id, scope, 10)
+            for team_id in (match.home_team.id, match.away_team.id)
+            for scope in ("overall", "home", "away")
+        ],
         RedisKeys.team_fixtures(match.home_team.id),
         RedisKeys.team_fixtures(match.away_team.id),
     )
@@ -93,7 +109,13 @@ def _publish_changes(
     state_key = RedisKeys.match_state(match.id)
     previous = redis.get(state_key)
     changes = detect_changes(match, previous, lineup_fingerprint=lineup_fingerprint, statistics=statistics)
-    redis.set(state_key, build_state_snapshot(match, lineup_fingerprint=lineup_fingerprint, statistics=statistics))
+    # A TTL, refreshed by every sync: the snapshot is only needed while a match is being tracked, and without one
+    # these keys accumulated for every match ever synced (and `volatile-lru` never evicts keys that have no TTL).
+    redis.set(
+        state_key,
+        build_state_snapshot(match, lineup_fingerprint=lineup_fingerprint, statistics=statistics),
+        ttl_seconds=settings.match_state_ttl_seconds,
+    )
     # Invalidate the cache-aside entries this match affects so the next API
     # request sees the new state immediately instead of waiting out the TTL.
     redis.delete(RedisKeys.match(match.id), RedisKeys.LIVE_MATCHES, RedisKeys.TODAY_MATCHES)
@@ -162,6 +184,29 @@ def sync_live_matches() -> None:
     cycle -- there's no separate "stop polling" step needed."""
 
     async def _run_task() -> None:
+        # The provider has a daily request quota, so only ask for live scores
+        # while a match is in play or about to be (the upcoming-kickoff task
+        # flips a match to LIVE in the database, which opens this gate).
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            active = (
+                await db.execute(
+                    select(Match.id)
+                    .where(
+                        Match.status.in_([MatchStatus.LIVE, MatchStatus.HALFTIME])
+                        | (
+                            (Match.status == MatchStatus.SCHEDULED)
+                            & (Match.kickoff_time <= now + _LIVE_LEAD_WINDOW)
+                            & (Match.kickoff_time >= now - _LIVE_TRAIL_WINDOW)
+                        )
+                    )
+                    .limit(1)
+                )
+            ).first()
+        if active is None:
+            metrics.set_live_matches(0)
+            return
+
         provider = get_provider()
         metrics.sync_job_started()
         try:

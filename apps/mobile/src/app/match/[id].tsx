@@ -1,4 +1,9 @@
 import { useLocalSearchParams } from "expo-router"
+import { AnalysisTab } from "@/components/analytics/analysis-tab"
+import { Discuss } from "@/components/community/discuss"
+import { InsightsBlock } from "@/components/insights-card"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { FlatList, RefreshControl, StyleSheet, Text, View } from "react-native"
 import { ConnectionBadge } from "@/components/connection-badge"
@@ -33,19 +38,23 @@ import { api, ApiError } from "@/lib/api"
 import { groupStandings, statRows } from "@/lib/match-centre"
 import { theme } from "@/theme"
 import type {
+  ArticleSummary,
   Capabilities,
   HeadToHeadOut,
   MatchDetail,
   MatchFormOut,
+  MatchInsightsOut,
   MatchLineupsOut,
   MatchStatisticsOut,
+  Page,
   StandingEntry,
 } from "@/types/api"
 
-type TabId = "overview" | "timeline" | "stats" | "lineups" | "table"
+type TabId = "overview" | "analysis" | "timeline" | "stats" | "lineups" | "table" | "news" | "discuss"
 
 const TABS: TabDef<TabId>[] = [
   { id: "overview", label: "Overview" },
+  { id: "analysis", label: "Analysis" },
   { id: "timeline", label: "Timeline" },
   { id: "stats", label: "Stats" },
   { id: "lineups", label: "Lineups" },
@@ -60,6 +69,8 @@ interface Loaded {
   form: MatchFormOut | null
   headToHead: HeadToHeadOut | null
   standings: StandingEntry[] | null
+  news: Page<ArticleSummary> | null
+  insights: MatchInsightsOut | null
 }
 
 /** The supplementary resources may each fail on their own (that tab shows an
@@ -85,7 +96,7 @@ export default function MatchScreen() {
     try {
       const matchId = Number(id)
       const match = await api.getMatch(matchId)
-      const [capabilities, lineups, statistics, form, headToHead, standings, favourites] = await Promise.all([
+      const [capabilities, lineups, statistics, form, headToHead, standings, favourites, news, insights] = await Promise.all([
         optional(api.getCapabilities()),
         optional(api.getMatchLineups(matchId)),
         optional(api.getMatchStatistics(matchId)),
@@ -93,8 +104,10 @@ export default function MatchScreen() {
         optional(api.getMatchHeadToHead(matchId)),
         optional(api.getStandings(match.competition.id)),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
+        optional(api.getMatchNews(matchId)),
+        optional(api.getMatchInsights(matchId)),
       ])
-      setLoaded({ match, capabilities, lineups, statistics, form, headToHead, standings })
+      setLoaded({ match, capabilities, lineups, statistics, form, headToHead, standings, news, insights })
       setInitialFollowed(favourites?.matches.some((f) => f.match.id === matchId) ?? false)
     } catch (e) {
       setError(e instanceof ApiError && e.status === 404 ? "Match not found." : "Unable to load this match.")
@@ -133,7 +146,7 @@ interface Row {
 }
 
 function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollowed: boolean }) {
-  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings, refresh } = useMatchDetail(
+  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings, refresh, nudges } = useMatchDetail(
     loaded.match,
     { lineups: loaded.lineups, statistics: loaded.statistics, standings: loaded.standings },
     loaded.capabilities,
@@ -175,6 +188,22 @@ function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollo
           </Card>
         ),
       })
+      if (loaded.insights && (loaded.insights.home.insights.length || loaded.insights.away.insights.length || loaded.insights.head_to_head.length)) {
+        out.push({
+          key: "insights",
+          node: (
+            <Card>
+              <SectionTitle>Form &amp; streaks</SectionTitle>
+              <View style={{ gap: 14 }}>
+                <InsightsBlock title={match.home_team.name} insights={loaded.insights.home.insights} />
+                <InsightsBlock title={match.away_team.name} insights={loaded.insights.away.insights} />
+                <InsightsBlock title="Head to head" insights={loaded.insights.head_to_head} />
+              </View>
+              <Text style={[styles.faint, { marginTop: 10 }]}>{loaded.insights.note}</Text>
+            </Card>
+          ),
+        })
+      }
       out.push({
         key: "h2h",
         node: (
@@ -187,6 +216,12 @@ function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollo
           </Card>
         ),
       })
+    } else if (tab === "analysis") {
+      out.push({ key: "analysis", node: <AnalysisTab match={match} nudges={nudges} /> })
+    } else if (tab === "discuss") {
+      out.push({ key: "discuss", node: <Discuss targetType="match" targetId={match.id} /> })
+    } else if (tab === "news" && loaded.news) {
+      out.push({ key: "news", node: <EntityNews kind="match" id={match.id} initial={loaded.news} /> })
     } else if (tab === "timeline") {
       const items = buildTimeline(match)
       if (items.length === 0) {
@@ -272,7 +307,9 @@ function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollo
       })
     }
     return out
-  }, [tab, match, form, headToHead, statistics, lineups, standings, capabilities, notStarted])
+  }, [tab, match, form, headToHead, statistics, lineups, standings, capabilities, notStarted, loaded.news, loaded.insights, nudges])
+
+  const tabs: TabDef<TabId>[] = [...TABS, ...(loaded.news && loaded.news.total > 0 ? [{ id: "news" as const, label: "News" }] : []), { id: "discuss", label: "Discuss" }]
 
   const header = (
     <View style={{ gap: 12, marginBottom: 12 }}>
@@ -283,7 +320,8 @@ function MatchCentre({ loaded, initialFollowed }: { loaded: Loaded; initialFollo
       <MatchHeader match={match} />
       <LiveAnnouncer match={match} />
       <StaleBanner status={connectionStatus} isLive={isLive} lastUpdatedAt={lastUpdatedAt} />
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <ShareButton kind="match" id={match.id} title={`${match.home_team.name} v ${match.away_team.name}`} />
+      <TabBar tabs={tabs} active={tab} onChange={setTab} />
     </View>
   )
 

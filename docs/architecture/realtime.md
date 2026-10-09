@@ -289,3 +289,12 @@ the provider sub-status independently (see `development/websockets.md`
 and `deployment/docker.md` for the full health-check picture) so an
 operator can tell "the provider is down but everything else is fine" apart
 from "the whole stack is down."
+
+## Phase 6 events
+
+Five additional `RealtimeEventType`s ride the same `football:events` channel: `comment.created`, `comment.reaction`,
+`poll.updated`, `match.insight.updated`, `prediction.updated`. They carry ids only, are throttled to one per type per
+match per 2 s (insight and prediction events are published only when something actually changed), reach sockets
+watching **that match** only (`PubSubBridge` skips the general feed for them), and the clients route them to a counter
+instead of the score reducer. Verified in Docker: 100 sockets on one match all received `comment.created` (median
+104 ms, last 127 ms on a laptop; `apps/api/scripts/ws_fanout.py`).

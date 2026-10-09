@@ -1,15 +1,25 @@
+import { PlayerAnalytics } from "@/components/analytics/player-analytics"
 import { Link, useLocalSearchParams } from "expo-router"
 import { useCallback, useEffect, useState } from "react"
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
 import { LoadingState } from "@/components/loading-state"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
 import { MatchCard } from "@/components/match-card"
 import { Card, SectionTitle } from "@/components/match-centre/ui"
 import { TeamBadge } from "@/components/team-badge"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
-import type { Capabilities, PlayerDetail, PlayerMatchStatsOut, PlayerStatisticsOut } from "@/types/api"
+import type {
+  ArticleSummary,
+  Capabilities,
+  Page,
+  PlayerDetail,
+  PlayerMatchStatsOut,
+  PlayerStatisticsOut,
+} from "@/types/api"
 
 function matchLine(stats: PlayerMatchStatsOut): string {
   // Only what the provider supplied: a null field is left out, never shown as 0.
@@ -27,6 +37,7 @@ export default function PlayerScreen() {
   const [player, setPlayer] = useState<PlayerDetail | null>(null)
   const [statistics, setStatistics] = useState<PlayerStatisticsOut | null>(null)
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
+  const [news, setNews] = useState<Page<ArticleSummary> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -34,11 +45,13 @@ export default function PlayerScreen() {
     setError(null)
     try {
       const playerId = Number(id)
-      const [p, stats, caps] = await Promise.all([
+      const [p, stats, caps, playerNews] = await Promise.all([
         api.getPlayer(playerId),
         api.getPlayerStatistics(playerId).catch(() => null),
         api.getCapabilities().catch(() => null),
+        api.getPlayerNews(playerId).catch(() => null),
       ])
+      setNews(playerNews)
       setPlayer(p)
       setStatistics(stats)
       setCapabilities(caps)
@@ -72,6 +85,7 @@ export default function PlayerScreen() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <ShareButton kind="player" id={player.id} title={player.name} />
       <View style={styles.headerCard}>
         <View style={styles.avatar} accessible={false}>
           <Text style={styles.avatarText}>{player.shirt_number ?? player.name.slice(0, 1)}</Text>
@@ -120,6 +134,8 @@ export default function PlayerScreen() {
         )}
       </Card>
 
+      <PlayerAnalytics playerId={player.id} showSeasons={false} />
+
       <Card>
         <SectionTitle>Recent matches</SectionTitle>
         {statistics && statistics.recent_matches.length > 0 ? (
@@ -133,6 +149,12 @@ export default function PlayerScreen() {
           <EmptyState message="No match statistics stored for this player yet." />
         )}
       </Card>
+      {news && news.total > 0 ? (
+        <Card>
+          <SectionTitle>News</SectionTitle>
+          <EntityNews kind="player" id={player.id} initial={news} />
+        </Card>
+      ) : null}
     </ScrollView>
   )
 }

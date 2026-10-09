@@ -24,6 +24,11 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="article/[slug]" options={{ title: "News" }} />
+        <Stack.Screen name="poll/[id]" options={{ title: "Poll" }} />
+        <Stack.Screen name="u/[id]" options={{ title: "Profile" }} />
+        <Stack.Screen name="editor/index" options={{ title: "Articles" }} />
+        <Stack.Screen name="editor/[id]" options={{ title: "Article" }} />
         <Stack.Screen name="match/[id]" options={{ title: "Match" }} />
         <Stack.Screen name="competition/[id]" options={{ title: "Competition" }} />
         <Stack.Screen name="team/[id]" options={{ title: "Team" }} />

@@ -1,4 +1,5 @@
 import Image from "next/image"
+import { shouldOptimizeCrest } from "@/lib/images"
 import { colorsFor, shortCodeFor } from "@/lib/colors"
 
 /** Pick a readable text color for a given hex background. */
@@ -33,6 +34,7 @@ export function TeamBadge({ name, shortName, logoUrl, size = 28 }: TeamBadgeProp
         alt={`${name} crest`}
         width={size}
         height={size}
+        unoptimized={!shouldOptimizeCrest(logoUrl)}
         className="shrink-0 object-contain"
       />
     )

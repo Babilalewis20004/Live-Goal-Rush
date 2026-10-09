@@ -4,6 +4,7 @@ from datetime import date
 from app.services.providers.schemas import (
     ProviderCapabilities,
     ProviderCompetition,
+    ProviderInjury,
     ProviderLineup,
     ProviderMatch,
     ProviderPlayer,
@@ -14,6 +15,11 @@ from app.services.providers.schemas import (
     ProviderTeamMatchStatistics,
     ProviderTopScorer,
 )
+
+
+class ProviderQuotaExhausted(Exception):
+    """The provider's request quota is (nearly) spent. Not retried: another
+    attempt would only spend more of it."""
 
 
 class FootballDataProvider(ABC):
@@ -81,6 +87,10 @@ class FootballDataProvider(ABC):
         return None
 
     async def get_top_scorers(self, competition_id: str) -> list[ProviderTopScorer]:
+        return []
+
+    async def get_team_injuries(self, team_id: str) -> list[ProviderInjury]:
+        """Current injuries / doubts for a team. Default: unsupported."""
         return []
 
     async def get_historical_standings(self, competition_id: str, season: str) -> list[ProviderStandingRow]:

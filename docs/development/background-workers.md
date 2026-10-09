@@ -78,6 +78,18 @@ task with its own retry policy (`bind=True, max_retries=3`), so a slow or
 failing push provider can never slow down or crash the sync tasks above.
 See `docs/architecture/notifications.md` for the full pipeline.
 
+### Discovery tasks (`app/worker/discovery_tasks.py`)
+
+| Task | Schedule | Does |
+| --- | --- | --- |
+| `aggregate_engagement` | every 60 s | Moves Redis hourly view/search counters into `engagement_buckets` and `articles.view_count` (atomic claim by `RENAME`; at-least-once) and purges buckets older than 30 days |
+| `calculate_trending` | every 5 min | Recomputes and caches trending teams/players/competitions/articles |
+| `dispatch_article_notifications(article_id)` | on first publish | Claims the article, resolves opted-in/relevant/under-cap users, claims each user, sends via the Phase 3 senders |
+
+They follow the same shape as the sync tasks (thin wrapper over async service code on the
+persistent event loop). Nothing expensive runs in an API route: the API only increments a
+Redis counter, reads caches, or enqueues the notification task.
+
 ## Idempotency (spec §24)
 
 Every sync ultimately calls `upsert_by_provider_id` /
@@ -129,3 +141,22 @@ behavior with monkeypatched sleep. Full Celery task execution (task
 routing, beat scheduling) isn't unit-tested — it's config, not logic — and
 is covered by the manual verification in the root
 `AGENTS.md`/`docker-compose.yml` flow instead.
+
+## Phase 6 jobs (`app/worker/social_tasks.py`, `analytics_tasks.py`)
+
+All idempotent; none is called from a request except the cheap "enqueue a notification" ones.
+
+| Task | Beat | Does |
+|---|---|---|
+| `publish_scheduled_articles` | 60 s | publish due scheduled articles, archive expired ones (atomic UPDATE … RETURNING) |
+| `close_due_polls` | 60 s | close due polls, enqueue result notifications |
+| `generate_predictions` | 30 min | estimate scheduled matches in the next 72 h; enqueue "estimate available" for new ones |
+| `evaluate_predictions` | 15 min | score finished matches' stored predictions once |
+| `generate_insights` | 10 min | refresh stored insights for live / upcoming / just-finished matches, their teams, players with stats |
+| `calculate_team_analytics` | 15 min | warm the analytics cache for teams playing in 24 h |
+| `notify_matchday` | 15 min | matchday reminders (24 h) and "poll closing soon" (60 min) for opted-in followers |
+| `process_subscription_events` | 1 h | mark lapsed subscriptions `EXPIRED` |
+| `notify_comment_reply`, `notify_editorial`, `notify_poll_results`, `notify_prediction_available`, `notify_subscription_event` | on demand | retried up to 3×, deduplicated by `(user, dedup_key)` |
+
+Every task is counted in `celery_tasks_total` / `celery_task_failures_total`; the queue length is a gauge.
+Verified in Docker: each analytics task was queued with `celery call` and succeeded on the worker.

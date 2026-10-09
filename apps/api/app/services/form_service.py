@@ -21,12 +21,14 @@ from app.models.match import Match
 from app.schemas.competition import CompetitionOut
 from app.schemas.form import (
     FormResultOut,
+    FormSummaryOut,
     HeadToHeadMeetingOut,
     HeadToHeadOut,
     MatchFormOut,
     TeamFormOut,
 )
 from app.schemas.team import TeamOut
+from app.services.analytics_math import Result, summarise_form
 from app.services.cache import CacheAside
 from app.services.football_service import NotFoundError
 
@@ -35,6 +37,9 @@ H2H_LIMIT = 5
 H2H_LOOKBACK_YEARS = 10
 
 _TEAM_SCOPES = ("overall", "home", "away")
+FORM_LIMITS = (5, 10)
+H2H_WINDOWS: dict[str, int | None] = {"last5": 5, "last10": 10, "all": None}
+H2H_ALL_LOOKBACK_YEARS = 50
 _LOAD = (
     selectinload(Match.competition),
     selectinload(Match.home_team),
@@ -89,27 +94,31 @@ class FormService:
                     competition=CompetitionOut.model_validate(m.competition),
                 )
             )
+        summary = summarise_form([Result(r.goals_for, r.goals_against) for r in results], limit)
         return TeamFormOut(
             team_id=team_id,
             scope=scope,
             limit=limit,
             results=results,
             sequence="".join(r.result for r in reversed(results)),
+            summary=FormSummaryOut(**summary.__dict__),
         )
 
-    async def get_team_form(self, team_id: int, scope: str = "overall") -> TeamFormOut:
+    async def get_team_form(self, team_id: int, scope: str = "overall", limit: int = FORM_LIMIT) -> TeamFormOut:
         """Current form (most recent finished results). Cached briefly; the
         worker invalidates it when one of the team's matches finishes."""
         if scope not in _TEAM_SCOPES:
             raise ValueError(f"Unknown form scope {scope!r}")
+        if limit not in FORM_LIMITS:
+            raise ValueError(f"Form window must be one of {FORM_LIMITS}")
 
         async def _load() -> TeamFormOut:
-            return await self._compute_team_form(team_id, scope, FORM_LIMIT, None, None)
+            return await self._compute_team_form(team_id, scope, limit, None, None)
 
         if self.cache is None:
             return await _load()
         return await self.cache.get_or_set_model(
-            RedisKeys.team_form(team_id, scope), TeamFormOut, _load, ttl_seconds=settings.redis_default_ttl_seconds
+            RedisKeys.team_form(team_id, scope, limit), TeamFormOut, _load, ttl_seconds=settings.redis_default_ttl_seconds
         )
 
     async def get_match_form(self, match_id: int, scope: str = "overall") -> MatchFormOut:
@@ -139,11 +148,16 @@ class FormService:
             key, MatchFormOut, _load, ttl_seconds=settings.redis_static_ttl_seconds
         )
 
-    async def get_head_to_head(self, match_id: int) -> HeadToHeadOut:
+    async def get_head_to_head(self, match_id: int, window: str = "last5") -> HeadToHeadOut:
+        if window not in H2H_WINDOWS:
+            raise ValueError(f"Head-to-head window must be one of {tuple(H2H_WINDOWS)}")
+        limit = H2H_WINDOWS[window]
+
         async def _load() -> HeadToHeadOut:
             match = await self._match(match_id)  # only on a cache miss; also the 404
             home_id, away_id = match.home_team_id, match.away_team_id
-            period_start = match.kickoff_time - timedelta(days=365 * H2H_LOOKBACK_YEARS)
+            years = H2H_ALL_LOOKBACK_YEARS if limit is None else H2H_LOOKBACK_YEARS
+            period_start = match.kickoff_time - timedelta(days=365 * years)
             stmt = (
                 select(Match)
                 .where(
@@ -158,24 +172,42 @@ class FormService:
                 )
                 .options(*_LOAD)
                 .order_by(Match.kickoff_time.desc())
-                .limit(H2H_LIMIT)
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             meetings = (await self.db.execute(stmt)).scalars().all()
 
             home_wins = draws = away_wins = 0
+            home_goals = away_goals = 0
+            letters: list[str] = []  # most recent first, from the match's home team's point of view
             for m in meetings:
-                if m.home_score == m.away_score:
+                mine, theirs = (m.home_score, m.away_score) if m.home_team_id == home_id else (m.away_score, m.home_score)
+                home_goals += mine
+                away_goals += theirs
+                if mine == theirs:
                     draws += 1
-                    continue
-                winner = m.home_team_id if m.home_score > m.away_score else m.away_team_id
-                if winner == home_id:
+                    letters.append("D")
+                elif mine > theirs:
                     home_wins += 1
+                    letters.append("W")
                 else:
                     away_wins += 1
+                    letters.append("L")
+            n = len(meetings)
+            complete = limit is None or n >= limit
+            limitation = None if complete else f"Only {n} of the last {limit} meetings are stored."
             return HeadToHeadOut(
                 home_team_id=home_id,
                 away_team_id=away_id,
-                limit=H2H_LIMIT,
+                limit=limit,
+                window=window,
+                total_meetings=n,
+                home_team_goals=home_goals,
+                away_team_goals=away_goals,
+                average_goals=round((home_goals + away_goals) / n, 2) if n else None,
+                recent_form="".join(reversed(letters)),
+                complete=complete,
+                limitation=limitation,
                 period_start=period_start,
                 before=match.kickoff_time,
                 meetings=[
@@ -198,7 +230,7 @@ class FormService:
         if self.cache is None:
             return await _load()
         return await self.cache.get_or_set_model(
-            RedisKeys.match_head_to_head(match_id),
+            RedisKeys.match_head_to_head(match_id, window),
             HeadToHeadOut,
             _load,
             ttl_seconds=settings.redis_static_ttl_seconds,

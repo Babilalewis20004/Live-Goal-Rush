@@ -10,6 +10,7 @@ __v0_jsx-dev-runtime.ts
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Node / web / mobile
 node_modules/
@@ -36,3 +37,13 @@ celerybeat-schedule*
 
 # Claude Code local state
 .claude/
+
+# Local secrets
+API-key.txt
+
+# Load-test data contains bearer tokens for synthetic users
+load/k6/world.json
+load/k6/out/
+load/results/
+
+.coverage

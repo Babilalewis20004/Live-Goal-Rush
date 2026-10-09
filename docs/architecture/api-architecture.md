@@ -65,9 +65,31 @@ per-favourite override. See `phase5.md`.
 
 | Method & path                | Description                                       |
 | ------------------------------ | --------------------------------------------------- |
-| `GET /api/v1/search?q=...`     | Teams, competitions, players and (Phase 4) matches matching the query — database-first with trigram indexes, every query bounded. Empty/missing `q` returns empty lists (200), not an error. |
+| `GET /api/v1/search?q=...&limit=` | Teams, competitions, players, matches and (discovery) **articles**, each group ranked exact > prefix > contains > fuzzy and capped (default 10, max 20). `q` ≤ 100 chars (422 above), rate limited 60/min per client. Empty/missing `q` returns empty lists (200). |
+| `GET /api/v1/search/suggestions?q=` | Up to 8 typed suggestions (team/competition/player/article), ≥ 2 characters, cached 2 min |
+| `GET /api/v1/search/popular` | Phrases several different visitors chose a result for |
+| `GET/DELETE /api/v1/search/recent` | The signed-in caller's own recent searches (`?query=` removes one) |
+| `POST /api/v1/search/track` | A search was submitted / a result chosen (204): adds to the caller's recent searches if signed in; choosing a result also feeds trending and popular |
 
-The full Phase 4 contract and rationale are in `match-centre.md`.
+The Phase 4 contract is in `match-centre.md`; the discovery contract in `discovery.md`.
+
+### News and discovery *(discovery brief)*
+
+Full write-up: [discovery.md](discovery.md).
+
+| Method & path | Description |
+| --- | --- |
+| `GET /api/v1/articles` | Published articles, newest first. Filters: `category`, `tag`, `featured`, `team_id`, `player_id`, `competition_id`, `match_id`. `Page{items,total,page,page_size}` |
+| `GET /api/v1/articles/{slug}` | One published article (sanitized `content`, `content_text`, `content_blocks`, linked teams/players/competitions/matches). 404 for drafts/archived |
+| `GET /api/v1/articles/{slug}/related?limit=` | Deterministically scored related articles, each with a `reason` |
+| `GET /api/v1/articles/categories`, `/tags` | Categories (data, not code); popular tags |
+| `GET /api/v1/{teams,players,competitions,matches}/{id}/news` | Articles linked to the entity (a match's news is match → team → competition, labelled by `relation`) |
+| `GET /api/v1/discovery/home` | Public home payload: results, featured/latest/trending news, trending teams/players, popular competitions |
+| `GET /api/v1/discovery/trending[/{teams\|players\|competitions\|articles}]?window_hours=&limit=` | Trending with explainable `signals` |
+| `GET /api/v1/feed` | **Auth.** The caller's personalised, tiered, explained feed |
+| `POST /api/v1/engagement/view` | Count one view (204; de-duplicated; rate limited) |
+| `GET/PUT /api/v1/notifications/content-preferences` | **Auth.** The five article-notification switches (all off by default) |
+| `GET/POST/PATCH/DELETE /api/v1/editor/articles…` | **Editor/admin.** List (own; admin: all), create, edit, `publish`, `unpublish`, `archive`, delete; `POST …/categories` (admin) |
 
 ## Response shapes
 
@@ -150,3 +172,34 @@ Everything lives under `/api/v1`. A breaking change to a response shape
 would ship as `/api/v2` alongside it rather than mutating `/api/v1` in
 place, so existing web/mobile client builds don't break out from under
 them.
+
+## Phase 6 additions
+
+Authentication: ✱ = signed in, ◆ = editor/admin, ★ = admin. "tiered" = the response is trimmed to the caller's
+plan by the server; an over-limit request gets `402 {message, entitlement}`.
+
+| Endpoint | Auth | Notes |
+|---|---|---|
+| `GET /teams/{id}/analytics?scope&window` | tiered | window ∈ 5, 10, 20, 38; >10 needs `extended_history`; 240/min/IP |
+| `GET /teams/{id}/form/extended?limit=5or10` | `extended_history` for 10 | form with streaks (`summary`) |
+| `GET /players/{id}/analytics?window` | tiered | per-90, history, trend |
+| `GET /matches/{id}/comparison` | tiered | cached per tier |
+| `GET /matches/{id}/prediction` | tiered | reads the stored estimate; never computes |
+| `GET /matches/{id}/head-to-head/extended?window=last5, last10 or all` | `extended_history` unless last5 | |
+| `GET /matches/{id}/insight-records`, `/teams/{id}/insight-records`, `/players/{id}/insights` | — | persisted insights with `source_data_version` |
+| `GET /predictions/evaluation` | — | accuracy, Brier vs baseline, calibration, sample size |
+| `GET /me/insights` | ✱ | sentences about the caller's favourites |
+| `GET /me/entitlements` | optional | informational; the server re-checks every request |
+| `GET /subscription/plans`, `GET /subscription`, `POST /subscription/checkout`, `POST /subscription/cancel` | none / ✱ | checkout 10/h |
+| `POST /billing/webhook` | HMAC signature | idempotent on event id; 120/min/IP |
+| `GET /ads/placements?live` | optional | eligibility only |
+| `POST /profiles/{id}/report` | ✱ | public profiles only; 10/h |
+| `GET /moderation/profile-reports`, `POST /moderation/profile-reports/{id}/resolve` or `/dismiss` | ◆ | |
+| `POST /moderation/users/{id}/suspend` or `/unsuspend` | ★ | |
+
+Phase 6a endpoints (media, editorial workflow, comments, reactions, polls, profiles) are documented in
+[community.md](community.md), [media.md](media.md) and [editorial-workflow.md](editorial-workflow.md).
+
+Changed, backward-compatibly: `TeamFormOut.summary`; `HeadToHeadOut` gained `window`, `total_meetings`, goals,
+`average_goals`, `recent_form`, `complete`, `limitation` and `limit` may be `null`; `FeedItem.reason` gained
+`community_match` / `community_article`; reactions have seven kinds; `RealtimeEventType` gained five values.

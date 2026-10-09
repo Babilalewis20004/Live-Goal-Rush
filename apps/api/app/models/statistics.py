@@ -13,7 +13,10 @@ from app.models.mixins import TimestampMixin
 
 class MatchStatistic(Base, TimestampMixin):
     __tablename__ = "match_statistics"
-    __table_args__ = (UniqueConstraint("match_id", "team_id", name="uq_match_statistics_match_team"),)
+    __table_args__ = (
+        UniqueConstraint("match_id", "team_id", name="uq_match_statistics_match_team"),
+        Index("ix_match_statistics_team", "team_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     match_id: Mapped[int] = mapped_column(
@@ -36,6 +39,7 @@ class PlayerMatchStatistic(Base, TimestampMixin):
     __tablename__ = "player_match_statistics"
     __table_args__ = (
         UniqueConstraint("match_id", "player_id", name="uq_player_match_statistics_match_player"),
+        Index("ix_player_match_statistics_team", "team_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

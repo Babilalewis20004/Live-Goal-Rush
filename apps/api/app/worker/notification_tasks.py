@@ -19,6 +19,7 @@ from app.services.notification_dispatch_service import resolve_targets
 from app.services.notifications.service import NotificationService
 from app.worker.async_runner import run
 from app.worker.celery_app import celery_app
+from app.worker.failure import retry_or_raise
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,10 @@ def dispatch_notifications(self, event_payload: dict) -> None:
                 event.match_id,
                 event.type.value,
             )
-            notification_service = NotificationService(db)
-            for target in targets:
-                await notification_service.send_to_user(target)
+            await NotificationService(db).send_to_users(targets)
 
     try:
         run(_run_task())
     except Exception as exc:
         logger.exception("dispatch_notifications failed for payload=%s", event_payload)
-        raise self.retry(countdown=5, exc=exc) from exc
+        retry_or_raise(self, exc)

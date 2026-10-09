@@ -5,8 +5,14 @@ import { LoadingState } from "@/components/loading-state"
 import { EmptyState } from "@/components/empty-state"
 import { ErrorState } from "@/components/error-state"
 import { ConnectionBadge } from "@/components/connection-badge"
-import { useLivescoreBoard } from "@/hooks/use-livescore-board"
+import { StaleBanner } from "@/components/stale-banner"
+import { PersonalInsights } from "@/components/community/personal-insights"
+import { DiscoverySections, ForYou } from "@/components/discovery-sections"
+import { BOARD_CACHE_KEY, useLivescoreBoard } from "@/hooks/use-livescore-board"
+import { useNow } from "@/hooks/use-now"
+import { describeFreshness } from "@/lib/freshness"
 import { groupByCompetition } from "@/lib/format"
+import { loadCopy, saveCopy } from "@/lib/offline-cache"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
 import type { MatchSummary } from "@/types/api"
@@ -28,6 +34,8 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set when the network failed and the on-device copy of the last good board is shown instead.
+  const [savedAt, setSavedAt] = useState<number | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -40,8 +48,18 @@ export default function HomeScreen() {
       setInitialLive(liveData)
       setInitialToday(todayData)
       setInitialUpcoming(upcomingData)
+      setSavedAt(null)
+      void saveCopy(BOARD_CACHE_KEY, { live: liveData, today: todayData, upcoming: upcomingData })
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Unable to load matches.")
+      const saved = await loadCopy<{ live: MatchSummary[]; today: MatchSummary[]; upcoming: MatchSummary[] }>(BOARD_CACHE_KEY)
+      if (saved) {
+        setInitialLive(saved.data.live)
+        setInitialToday(saved.data.today)
+        setInitialUpcoming(saved.data.upcoming)
+        setSavedAt(saved.savedAt)
+      } else {
+        setError(e instanceof ApiError ? e.message : "Unable to load matches.")
+      }
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -71,6 +89,7 @@ export default function HomeScreen() {
       initialLive={initialLive}
       initialToday={initialToday}
       initialUpcoming={initialUpcoming}
+      savedAt={savedAt}
       filter={filter}
       setFilter={setFilter}
       refreshing={refreshing}
@@ -86,6 +105,7 @@ function LiveHomeScreen({
   initialLive,
   initialToday,
   initialUpcoming,
+  savedAt,
   filter,
   setFilter,
   refreshing,
@@ -94,12 +114,21 @@ function LiveHomeScreen({
   initialLive: MatchSummary[]
   initialToday: MatchSummary[]
   initialUpcoming: MatchSummary[]
+  savedAt: number | null
   filter: Filter
   setFilter: (f: Filter) => void
   refreshing: boolean
   onRefresh: () => void
 }) {
-  const board = useLivescoreBoard(initialLive, initialToday, initialUpcoming)
+  const board = useLivescoreBoard(initialLive, initialToday, initialUpcoming, savedAt)
+  const now = useNow(5_000)
+  const freshness = describeFreshness({
+    connection: board.connectionStatus,
+    lastUpdatedAt: board.lastUpdatedAt,
+    now: now.getTime(),
+    fromSavedCopy: board.showingSavedCopy,
+    lastRefreshFailed: board.lastRefreshFailed,
+  })
 
   const active = useMemo(() => {
     switch (filter) {
@@ -125,6 +154,10 @@ function LiveHomeScreen({
       <View style={styles.headerRow}>
         <ConnectionBadge status={board.connectionStatus} />
       </View>
+      <StaleBanner message={freshness.message} />
+
+      <PersonalInsights />
+      <ForYou />
 
       <View style={styles.tabs}>
         {FILTERS.map((f) => {
@@ -148,6 +181,8 @@ function LiveHomeScreen({
           <LeagueSection key={competition.id} competition={competition} matches={matches} />
         ))
       )}
+
+      <DiscoverySections />
     </ScrollView>
   )
 }

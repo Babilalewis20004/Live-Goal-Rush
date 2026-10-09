@@ -1,3 +1,4 @@
+import { TeamAnalytics } from "@/components/analytics/team-analytics"
 import { Link, useLocalSearchParams } from "expo-router"
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native"
@@ -6,6 +7,9 @@ import { ErrorState } from "@/components/error-state"
 import { FavouriteButton } from "@/components/favourite-button"
 import { LoadingState } from "@/components/loading-state"
 import { MatchCard } from "@/components/match-card"
+import { InsightsBlock } from "@/components/insights-card"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
 import { SquadRow } from "@/components/match-centre/rows"
 import { Card, FeatureState, FormStrip, SectionTitle, TabBar, type TabDef } from "@/components/match-centre/ui"
 import { TeamBadge } from "@/components/team-badge"
@@ -13,15 +17,19 @@ import { useAuth } from "@/hooks/use-auth"
 import { api, ApiError } from "@/lib/api"
 import { theme } from "@/theme"
 import type {
+  ArticleSummary,
   Capabilities,
   MatchSummary,
+  Page,
   PlayerOut,
   TeamDetail,
   TeamFormOut,
+  TeamInjuriesOut,
+  TeamInsightsOut,
   TeamStatisticsOut,
 } from "@/types/api"
 
-type TabId = "overview" | "fixtures" | "results" | "squad" | "stats"
+type TabId = "overview" | "fixtures" | "results" | "squad" | "stats" | "analytics" | "news"
 
 const TABS: TabDef<TabId>[] = [
   { id: "overview", label: "Overview" },
@@ -29,6 +37,7 @@ const TABS: TabDef<TabId>[] = [
   { id: "results", label: "Results" },
   { id: "squad", label: "Squad" },
   { id: "stats", label: "Statistics" },
+  { id: "analytics", label: "Analytics" },
 ]
 
 interface Loaded {
@@ -39,6 +48,9 @@ interface Loaded {
   squad: PlayerOut[] | null
   statistics: TeamStatisticsOut | null
   capabilities: Capabilities | null
+  news: Page<ArticleSummary> | null
+  insights: TeamInsightsOut | null
+  injuries: TeamInjuriesOut | null
 }
 
 async function optional<T>(promise: Promise<T>): Promise<T | null> {
@@ -63,7 +75,7 @@ export default function TeamScreen() {
     try {
       const teamId = Number(id)
       const team = await api.getTeam(teamId)
-      const [fixtures, results, overall, home, away, squad, statistics, capabilities, favourites] = await Promise.all([
+      const [fixtures, results, overall, home, away, squad, statistics, capabilities, favourites, news, insights, injuries] = await Promise.all([
         api.getTeamFixtures(teamId),
         api.getTeamResults(teamId, 1, 20),
         optional(api.getTeamForm(teamId, "overall")),
@@ -73,6 +85,9 @@ export default function TeamScreen() {
         optional(api.getTeamStatistics(teamId)),
         optional(api.getCapabilities()),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
+        optional(api.getTeamNews(teamId)),
+        optional(api.getTeamInsights(teamId)),
+        optional(api.getTeamInjuries(teamId)),
       ])
       setLoaded({
         team,
@@ -82,6 +97,9 @@ export default function TeamScreen() {
         squad,
         statistics,
         capabilities,
+        news,
+        insights,
+        injuries,
       })
       setInitialFollowed(favourites?.teams.some((f) => f.team.id === teamId) ?? false)
     } catch (e) {
@@ -101,6 +119,18 @@ export default function TeamScreen() {
     const { team, fixtures, results, form, squad, statistics, capabilities } = loaded
     const out: { key: string; node: ReactNode }[] = []
     if (tab === "overview") {
+      if (loaded.insights && loaded.insights.insights.length > 0) {
+        out.push({
+          key: "insights",
+          node: (
+            <Card>
+              <SectionTitle>Form &amp; streaks</SectionTitle>
+              <InsightsBlock title={`Last ${loaded.insights.sample_size} results`} insights={loaded.insights.insights} />
+              <Text style={{ color: theme.textFaint, fontSize: 11, marginTop: 10 }}>Historical results only. Not a prediction.</Text>
+            </Card>
+          ),
+        })
+      }
       out.push({
         key: "form",
         node: (
@@ -115,6 +145,40 @@ export default function TeamScreen() {
           </Card>
         ),
       })
+      if (loaded.injuries?.supported && loaded.injuries.items.length > 0) {
+        // Nothing is shown for an empty list: it would read as "no injuries".
+        out.push({
+          key: "injuries",
+          node: (
+            <Card>
+              <SectionTitle>Injuries &amp; doubts</SectionTitle>
+              {loaded.injuries.items.map((injury) => (
+                <View
+                  key={`${injury.player_name}-${injury.match_date}`}
+                  style={styles.injuryRow}
+                  accessible
+                  accessibilityLabel={`${injury.player_name}, ${injury.kind === "missing" ? "out" : "doubtful"}${injury.reason ? `, ${injury.reason}` : ""}`}
+                >
+                  <Text style={styles.injuryName} numberOfLines={1}>
+                    {injury.player_name}
+                  </Text>
+                  {injury.reason && (
+                    <Text style={styles.faint} numberOfLines={1}>
+                      {injury.reason}
+                    </Text>
+                  )}
+                  <Text style={[styles.injuryBadge, injury.kind === "missing" ? styles.injuryOut : styles.injuryDoubtful]}>
+                    {injury.kind === "missing" ? "Out" : "Doubtful"}
+                  </Text>
+                </View>
+              ))}
+              <Text style={[styles.faint, { marginTop: 10 }]}>
+                Reported by the data provider; availability can change before kickoff.
+              </Text>
+            </Card>
+          ),
+        })
+      }
       if (team.venue) {
         out.push({
           key: "venue",
@@ -156,6 +220,8 @@ export default function TeamScreen() {
           ),
         })
       }
+    } else if (tab === "analytics") {
+      out.push({ key: "analytics", node: <TeamAnalytics teamId={team.id} /> })
     } else if (tab === "fixtures" || tab === "results") {
       const list = tab === "fixtures" ? fixtures : results
       if (list.length === 0) {
@@ -165,6 +231,8 @@ export default function TeamScreen() {
         })
       }
       for (const m of list) out.push({ key: `m-${m.id}`, node: <MatchCard match={m} /> })
+    } else if (tab === "news" && loaded.news) {
+      out.push({ key: "news", node: <EntityNews kind="team" id={team.id} initial={loaded.news} /> })
     } else if (tab === "squad") {
       if (!squad || squad.length === 0) {
         out.push({
@@ -239,6 +307,7 @@ export default function TeamScreen() {
   }
 
   const { team } = loaded
+  const tabs: TabDef<TabId>[] = loaded.news && loaded.news.total > 0 ? [...TABS, { id: "news", label: "News" }] : TABS
   const header = (
     <View style={{ gap: 12, marginBottom: 12 }}>
       <View style={styles.headerCard}>
@@ -251,7 +320,8 @@ export default function TeamScreen() {
         </View>
         <FavouriteButton kind="team" id={team.id} initialFollowed={initialFollowed} />
       </View>
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <ShareButton kind="team" id={team.id} title={team.name} />
+      <TabBar tabs={tabs} active={tab} onChange={setTab} />
     </View>
   )
 
@@ -293,5 +363,10 @@ const styles = StyleSheet.create({
   statTitle: { color: theme.text, fontSize: 14, fontWeight: "700", flex: 1 },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   statCell: { width: "30%", alignItems: "center", paddingVertical: 8, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.05)" },
+  injuryRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 40 },
+  injuryName: { color: theme.text, fontSize: 14, flex: 1 },
+  injuryBadge: { fontSize: 10, fontWeight: "700", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, overflow: "hidden" },
+  injuryOut: { color: "#fca5a5", backgroundColor: "rgba(239,68,68,0.15)" },
+  injuryDoubtful: { color: "#fcd34d", backgroundColor: "rgba(245,158,11,0.15)" },
   statValue: { color: theme.text, fontSize: 16, fontWeight: "800" },
 })

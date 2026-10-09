@@ -117,6 +117,30 @@ team_id)`. Indexes: `pg_trgm` GIN on `teams.name`/`players.name`/
 `competitions.name`; `(home_team_id, kickoff_time)` and
 `(away_team_id, kickoff_time)` on `matches`.
 
+### Discovery additions
+
+Migration `d56d209c5f0e` (`alembic upgrade head` from a fresh database *and* from a
+Phase 4 database with data was verified; `alembic check` reports no drift; nothing
+existing is altered except `users.role`, added with default `USER`).
+
+| Table | Purpose | Identity |
+| --- | --- | --- |
+| `articles` | News: sanitized HTML body, status, `published_at`, `view_count`, `notified_at` | `slug` unique |
+| `article_categories` | Categories, optionally pointing at a `competition` | `slug` unique |
+| `article_tags` / `article_tag_links` | Reusable tags | `slug` unique / `(article_id, tag_id)` |
+| `article_teams` / `article_players` / `article_competitions` / `article_matches` | Links to the existing football entities, `ON DELETE CASCADE` | `(article_id, entity_id)` |
+| `engagement_buckets` | Hourly counts per entity and signal (`view`/`search`) — counts only, no personal data | `(entity_type, entity_id, signal, bucket)` |
+| `recent_searches` | A signed-in user's own recent searches (newest 10) | `(user_id, query)` |
+| `content_notification_preferences` | Article notification switches | `(user_id, kind)` |
+| `content_notification_log` | Idempotency + daily-cap ledger for article pushes | `(user_id, article_id)` |
+
+`users.role` (`USER`/`EDITOR`/`ADMIN`). Note the repo's convention that
+`Enum(..., native_enum=False)` columns store the member **name** (`'PUBLISHED'`), which
+matters for hand-written SQL such as the partial index `ix_articles_featured`.
+Indexes: `(status, published_at)`, `(category_id, published_at)`, trigram on
+`articles.title`, partial featured index, entity-id indexes on every link table,
+`(entity_type, bucket)` on `engagement_buckets`.
+
 ## Relationships
 
 ```
@@ -174,3 +198,28 @@ the `standings` table, the `match_events` identity constraint). `env.py` is
 configured for SQLAlchemy's async engine (via `asyncpg`), so autogeneration
 and upgrades both run against the real async models — there's no separate
 sync-only shadow configuration to keep in sync.
+
+## Phase 6
+
+**6a — `e6a1c0de0601`**: `media_folders`, `media`, `media_variants`, `article_revisions`, `comments`, `comment_likes`,
+`comment_reports`, `reactions` (unique `user, target`), `polls`, `poll_options`, `poll_votes` (unique `poll, user`),
+`social_notification_log` (unique `user, dedup_key`); articles gain `publish_at`, `unpublish_at`, `review_note`,
+`featured_media_id`, gallery; users gain `profile_public`, `bio`.
+
+**6b — `a7c3d9e1b402`** (additive, reversible; verified on a fresh database, on an existing one, and through a
+downgrade/upgrade cycle, and `alembic check` reports no drift):
+
+| Table | Purpose | Key constraints |
+|---|---|---|
+| `predictions` | stored model output | unique `(match_id, model_version)`; FK `matches` ON DELETE CASCADE |
+| `prediction_evaluations` | scored predictions | unique `prediction_id`; FK CASCADE |
+| `insights` | persisted insight sentences | unique `(entity_type, entity_id, insight_type)`; index `(entity_type, entity_id)` |
+| `subscription_plans` | plan catalogue (entitlements as JSONB) | unique `code` |
+| `subscriptions` | a user's subscription | unique `(provider, provider_subscription_id)`; index `(user_id, status)` |
+| `entitlements` | operator grants | unique `(user_id, key)` |
+| `payment_events` | webhook ledger | unique `(provider, event_id)` — the idempotency key |
+| `profile_reports` | reported public profiles | unique `(profile_user_id, reporter_id)`; index `(status, created_at)` |
+
+`users` gains `suspended_at`, `suspended_reason`. New indexes `ix_match_statistics_team`,
+`ix_player_match_statistics_team` serve the analytics aggregates. Enum columns store member **names** as strings
+(length-limited, no native enum), so adding a reaction kind or notification kind needs no schema change.

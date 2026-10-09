@@ -15,6 +15,16 @@ import type {
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000"
 
+/** Phase 6b nudges carry ids only (no score), so they must never go through
+ * `applyRealtimeMessage`. A component watches the counter for its event and refetches. */
+export const NUDGE_TYPES = new Set<string>([
+  "comment.created",
+  "comment.reaction",
+  "poll.updated",
+  "match.insight.updated",
+  "prediction.updated",
+])
+
 export function applyRealtimeMessage(match: MatchDetail, message: RealtimeMessage): MatchDetail {
   if (Number(message.match.id) !== match.id) return match
 
@@ -71,6 +81,8 @@ export interface MatchDetailState extends MatchCentreExtras {
   connectionStatus: ConnectionStatus
   /** ISO time of the last successful REST refresh or WebSocket message. */
   lastUpdatedAt: string | null
+  /** How many times each community/analytics nudge has arrived (see `NUDGE_TYPES`). */
+  nudges: Record<string, number>
 }
 
 /** Real-time data hook for the match centre: seeds from the server-fetched
@@ -89,6 +101,7 @@ export function useMatchDetail(
   const [standings, setStandings] = useState<StandingEntry[] | null>(initialExtras.standings ?? null)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting")
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(initial.last_synced_at)
+  const [nudges, setNudges] = useState<Record<string, number>>({})
 
   const competitionId = initial.competition.id
   const wantsLineups = capabilities ? capabilities.lineups : true
@@ -141,6 +154,10 @@ export function useMatchDetail(
       onStatusChange: setConnectionStatus,
       onMessage: (message) => {
         if (Number(message.match.id) !== initial.id) return
+        if (NUDGE_TYPES.has(message.type)) {
+          setNudges((n) => ({ ...n, [message.type]: (n[message.type] ?? 0) + 1 }))
+          return
+        }
         setMatch((prev) => applyRealtimeMessage(prev, message))
         setLastUpdatedAt(new Date().toISOString())
         if (message.match.statistics) setStatistics(message.match.statistics)
@@ -164,5 +181,5 @@ export function useMatchDetail(
     }
   }, [initial.id, refresh, loadLineups, loadStatistics, loadStandings, wantsLineups, wantsStatistics])
 
-  return { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings }
+  return { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings, nudges }
 }

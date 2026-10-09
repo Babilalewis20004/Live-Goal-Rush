@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -14,7 +14,11 @@ class FavouriteTeam(Base, TimestampMixin):
     constraint is still correct and worth having."""
 
     __tablename__ = "favourite_teams"
-    __table_args__ = (UniqueConstraint("user_id", "team_id", name="uq_favourite_teams_user_team"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "team_id", name="uq_favourite_teams_user_team"),
+        # "Which teams gained followers in the last day?" (trending) filters on a short time window.
+        Index("ix_favourite_teams_created", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,6 +18,12 @@ class RefreshToken(Base, TimestampMixin):
     (the standard defense against a stolen-then-replayed refresh token)."""
 
     __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        # `replaced_by_id` is a self-referencing ON DELETE SET NULL key. Without an index every deleted token
+        # scanned the whole table to null out references: purging 18,675 expired tokens from 80,000 took 186 s
+        # (1.2 s with the index), and the same trigger slows account deletion and session cleanup.
+        Index("ix_refresh_tokens_replaced_by", "replaced_by_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(

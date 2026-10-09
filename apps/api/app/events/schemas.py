@@ -31,6 +31,13 @@ class RealtimeEventType(str, enum.Enum):
     # match-centre screens.
     LINEUP_UPDATED = "LINEUP_UPDATED"
     STATISTICS_UPDATED = "STATISTICS_UPDATED"
+    # Phase 6b: community and analytics nudges for an open match page. Ids and counts
+    # only; never notified, never sent to the general livescore feed.
+    COMMENT_CREATED = "comment.created"
+    COMMENT_REACTION = "comment.reaction"
+    POLL_UPDATED = "poll.updated"
+    MATCH_INSIGHT_UPDATED = "match.insight.updated"
+    PREDICTION_UPDATED = "prediction.updated"
 
 
 class RealtimeEvent(BaseModel):

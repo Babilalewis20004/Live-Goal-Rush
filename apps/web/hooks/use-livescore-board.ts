@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { api } from "@/lib/api"
+import { NUDGE_TYPES } from "@/hooks/use-match-detail"
 import { ConnectionStatus, RealtimeConnection } from "@/lib/realtime"
 import type { MatchSummary, RealtimeMessage } from "@/types/api"
 
@@ -104,7 +105,10 @@ export function useLivescoreBoard(
     const connection = new RealtimeConnection({
       url: `${WS_BASE_URL}/ws/matches`,
       onStatusChange: setConnectionStatus,
-      onMessage: (message) => setMatchMap((prev) => applyRealtimeMessage(prev, message)),
+      onMessage: (message) => {
+        if (NUDGE_TYPES.has(message.type)) return // community nudges carry no score
+        setMatchMap((prev) => applyRealtimeMessage(prev, message))
+      },
       onReconnect: refresh,
     })
     connection.connect()

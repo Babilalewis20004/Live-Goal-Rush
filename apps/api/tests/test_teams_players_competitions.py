@@ -9,7 +9,7 @@ from app.models.competition import Competition
 from app.models.standing import Standing
 from app.models.team import Team
 from app.services.football_service import FootballService
-from app.services.providers.mock_provider import MockFootballDataProvider
+from tests.fakes.mock_provider import MockFootballDataProvider
 from app.services.season import current_season_label
 from app.services.team_player_service import TeamPlayerService
 
@@ -366,7 +366,7 @@ async def test_search_players_and_competitions_partial_case_insensitive(seeded_c
 async def test_search_treats_like_wildcards_literally(seeded_client):
     for q in ("%", "_", "a%"):
         data = (await seeded_client.get("/api/v1/search", params={"q": q})).json()
-        assert data == {"teams": [], "competitions": [], "players": [], "matches": []}, q
+        assert data == {"teams": [], "competitions": [], "players": [], "matches": [], "articles": []}, q
 
 
 async def test_search_matches_nearest_to_now_first(seeded_client):

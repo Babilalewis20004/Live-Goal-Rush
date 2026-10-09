@@ -26,7 +26,16 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close()
   const data = event.notification.data || {}
-  const path = data.type && data.id != null ? `/${data.type}/${data.id}` : "/"
+  // Same contract as the mobile app: only these pages, and the id (for an
+  // article, its slug) must look like an id -- a malformed payload opens "/".
+  const TYPES = ["match", "team", "competition", "player", "article", "poll", "editor"]
+  const id = data.id != null ? String(data.id) : ""
+  const path =
+    data.type === "premium"
+      ? "/premium" // subscription notices: one page, no id
+      : TYPES.includes(data.type) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(id)
+        ? `/${data.type}/${id}`
+        : "/"
 
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {

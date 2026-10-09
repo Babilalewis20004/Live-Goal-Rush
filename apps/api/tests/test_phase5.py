@@ -16,7 +16,7 @@ from app.services.metrics_aggregation import (
     read_aggregate,
     render_prometheus,
 )
-from app.services.providers.mock_provider import MockFootballDataProvider
+from tests.fakes.mock_provider import MockFootballDataProvider
 from app.services.providers.real_provider import RealFootballDataProvider, parse_features
 from app.services.season import current_season_label, is_requestable_past_season
 from app.worker import tasks

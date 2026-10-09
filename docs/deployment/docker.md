@@ -87,6 +87,21 @@ machine — so it must resolve `ws://localhost:8000`, not the Docker-internal
 hostname. `docker-compose.yml`'s `web` service sets these independently
 for exactly this reason (see its inline comment).
 
+### Web ↔ API addresses (browser vs server)
+
+Server Components run inside the `web` container and call the API on the Docker network
+(`NEXT_PUBLIC_API_URL`, `http://api:8000`). **Client components run in the visitor's
+browser**, which cannot resolve `api`, so they use `NEXT_PUBLIC_BROWSER_API_URL` (default
+`http://localhost:8000`, the published API port). Login, follow buttons, search
+suggestions, view tracking and the editor all depend on it. Both, plus
+`NEXT_PUBLIC_SITE_URL` (the canonical origin used by SEO), are **build arguments**
+(`NEXT_PUBLIC_*` is fixed at build time), set in `docker-compose.yml`.
+
+`TRUSTED_PROXY_CIDRS` (default: the private ranges Docker uses) makes the API believe the
+`X-Forwarded-For` the web container sends for server-rendered searches, so rate limits
+apply per visitor rather than to the web server as a whole. Set it to your load balancer's
+range in production, or empty to disable.
+
 ## Health checks (spec §28)
 
 `GET /health` reports each critical dependency independently rather than a
@@ -124,3 +139,17 @@ candidate if a real metrics backend is introduced).
 docker compose down          # stop, keep volumes (Postgres/Redis data persists)
 docker compose down -v       # also drop postgres_data and redis_data
 ```
+
+## Phase 6 services
+
+`minio` (object storage, ports 9000/9001), `redis-exporter`, `prometheus` (9090), `grafana` (3001, dashboards and the
+data source provisioned from `monitoring/`). The API image now needs Pillow, boto3, python-multipart and
+`sqlalchemy[asyncio]` (**`greenlet` became optional in SQLAlchemy 2.1**, so a freshly built image without the extra
+fails at `alembic upgrade` — fixed in `requirements.txt`).
+
+* MinIO's community image is no longer on Docker Hub; Compose uses `cgr.dev/chainguard/minio:latest` (distroless: no
+  shell, so no container healthcheck; the API creates the bucket on start-up and again on first upload).
+* Billing uses the `test` provider by default and refuses to start with it when `ENVIRONMENT=production`.
+* Verified end to end with `docker compose up -d`: migrations from both a fresh and an existing database, upload to
+  MinIO and retrieval, worker tasks, signed webhook → entitlements, WebSocket nudges, Prometheus targets
+  (api, redis, prometheus up), alert rules, five Grafana dashboards, web `/premium`.

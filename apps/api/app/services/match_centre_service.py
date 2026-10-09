@@ -277,7 +277,7 @@ class MatchCentreService:
             )
             for lu in sorted(lineups, key=lambda x: x.team_id)
         ]
-        return hashlib.sha1(json.dumps(payload, default=str).encode()).hexdigest()[:16]
+        return hashlib.sha1(json.dumps(payload, default=str).encode(), usedforsecurity=False).hexdigest()[:16]
 
     async def statistics_snapshot(self, match: Match) -> dict | None:
         """Compact, JSON-serializable {home: {...}, away: {...}} of stored

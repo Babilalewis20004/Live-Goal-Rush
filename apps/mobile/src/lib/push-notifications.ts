@@ -4,6 +4,7 @@ import { router } from "expo-router"
 import { Platform } from "react-native"
 
 import { ApiError, api } from "@/lib/api"
+import { hrefForNotification } from "@/lib/deep-links"
 
 type NotificationsModule = typeof import("expo-notifications")
 
@@ -102,12 +103,9 @@ export function addNotificationResponseListener(): () => void {
   void loadNotifications().then((Notifications) => {
     if (!Notifications || cancelled) return
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data as
-        | { type?: string; id?: number | string }
-        | undefined
-      if (data?.type && data.id != null) {
-        router.push(`/${data.type}/${data.id}` as Parameters<typeof router.push>[0])
-      }
+      // Allow-listed screens only (match/team/competition/player/article).
+      const href = hrefForNotification(response.notification.request.content.data as { type?: unknown; id?: unknown })
+      if (href) router.push(href as Parameters<typeof router.push>[0])
     })
     unsubscribe = () => subscription.remove()
   })

@@ -215,3 +215,13 @@ describe("applyRealtimeMessage (Phase 4 payload fields)", () => {
     expect(next.events).toEqual([])
   })
 })
+
+describe("community and analytics nudges (Phase 6b)", () => {
+  it("are recognised so they are never applied as score updates", async () => {
+    const { NUDGE_TYPES } = await import("./use-match-detail")
+    for (const type of ["comment.created", "comment.reaction", "poll.updated", "match.insight.updated", "prediction.updated"]) {
+      expect(NUDGE_TYPES.has(type)).toBe(true)
+    }
+    for (const type of ["GOAL", "MATCH_FINISHED", "STATISTICS_UPDATED"]) expect(NUDGE_TYPES.has(type)).toBe(false)
+  })
+})

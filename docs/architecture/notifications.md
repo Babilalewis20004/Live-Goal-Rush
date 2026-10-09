@@ -146,6 +146,21 @@ GET/POST  /api/v1/devices
 DELETE    /api/v1/devices/{device_id}
 ```
 
+### Article notifications *(discovery brief)*
+
+News notifications reuse this device registry and sender abstraction but not the
+match-event dispatcher. They are opt-in (five preferences, all off), relevance-gated,
+capped at 3 per user per day and idempotent; see [discovery.md](discovery.md) §7.
+
+```
+GET/PUT   /api/v1/notifications/content-preferences
+```
+
+The payload is `{"type": "article", "id": "<slug>"}` — the same `{type, id}` contract,
+with the slug as id. Web's service worker and the mobile tap handler both allow-list the
+types (`match`, `team`, `competition`, `player`, `article`) and validate the id before
+navigating.
+
 ## Mobile push (Expo)
 
 `apps/mobile/src/lib/push-notifications.ts::registerForPushNotificationsAsync`
@@ -199,3 +214,11 @@ fan-out, stale-device removal on a permanent failure, and that a
 transient failure leaves the device registered. `apps/api/tests/
 test_devices_and_preferences_api.py` — the REST endpoints, including
 cross-user isolation and the `GLOBAL`-scope idempotent upsert.
+
+## Phase 6 kinds
+
+`comment_replies` (default on), `editorial_updates` (on), `poll_results` (off), and from 6b `prediction_available`,
+`team_insights` ("matchday"), `poll_closing` (all off) and `subscription_events` (**on**, about your own account).
+All go through `social_notification_service.deliver`: preference → unique `(user, dedup_key)` claim → send. Audience for
+match-related kinds = followers of either team or the match; nobody is notified about their own action. Deep links:
+`{type: "match" | "article" | "poll" | "editor", id}`, and `{type: "premium"}` → the Premium screen/page.

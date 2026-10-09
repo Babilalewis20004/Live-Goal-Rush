@@ -17,7 +17,7 @@ from typing import TypeVar
 import httpx
 
 from app.core.config import settings
-from app.services.providers.base import FootballDataProvider
+from app.services.providers.base import FootballDataProvider, ProviderQuotaExhausted
 from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,9 @@ async def call_with_backoff(operation: str, fn: Callable[[], Awaitable[T]]) -> T
         metrics.provider_request()
         try:
             return await fn()
+        except ProviderQuotaExhausted as exc:
+            logger.warning("%s skipped: %s", operation, exc)
+            raise ProviderUnavailableError(str(exc)) from exc
         except httpx.HTTPStatusError as exc:
             metrics.provider_error()
             if exc.response.status_code == 429:

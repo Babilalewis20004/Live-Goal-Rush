@@ -1,0 +1,57 @@
+name: Deploy a release to a Docker host
+description: >-
+  Pulls the release's images on the target host, applies database migrations once, rolls the services, then runs the
+  smoke test against the public origin. A failed smoke test fails the job and prints the rollback command.
+
+inputs:
+  host: { description: "SSH host", required: true }
+  user: { description: "SSH user", required: true }
+  ssh-key: { description: "Private key (from the environment's secrets)", required: true }
+  version: { description: "Release version, without the leading v", required: true }
+  image-prefix: { description: "Registry path prefix, e.g. ghcr.io/org/repo", required: true }
+  public-origin: { description: "https:// origin users reach the site on", required: true }
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare SSH
+      shell: bash
+      run: |
+        install -m 600 /dev/null key
+        printf '%s\n' "${{ inputs.ssh-key }}" > key
+        mkdir -p ~/.ssh && ssh-keyscan -H "${{ inputs.host }}" >> ~/.ssh/known_hosts
+
+    - name: Roll the release
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        PREFIX: ${{ inputs.image-prefix }}
+      run: |
+        # The host keeps its secrets in /opt/livepitch/.env.production (never in the repository or this pipeline).
+        ssh -i key -o BatchMode=yes "${{ inputs.user }}@${{ inputs.host }}" bash -s <<REMOTE
+        set -euo pipefail
+        cd /opt/livepitch
+        previous=\$(cat .release 2>/dev/null || echo none)
+        echo "previous release: \$previous -> new release: ${VERSION}"
+        export APP_VERSION="${VERSION}" API_IMAGE="${PREFIX}-api:${VERSION}" WEB_IMAGE="${PREFIX}-web:${VERSION}"
+        compose="docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml --env-file .env.production"
+        \$compose pull api web
+        # 1. Database first, once, before any new code serves traffic. Migrations are expand-only (docs/deployment/migrations.md),
+        #    so the still-running previous version keeps working against the new schema.
+        \$compose run --rm -e RUN_MIGRATIONS=1 --no-deps api alembic upgrade head
+        # 2. Roll the application. Replicas start with RUN_MIGRATIONS=0.
+        RUN_MIGRATIONS=0 \$compose up -d --no-deps --wait api worker scheduler web nginx
+        echo "${VERSION}" > .release
+        echo "\$previous" > .release.previous
+        REMOTE
+
+    - name: Smoke test the public site
+      shell: bash
+      run: |
+        pip install -q httpx websockets
+        origin="${{ inputs.public-origin }}"
+        python apps/api/scripts/smoke.py --base "$origin" --web "$origin" --edge --origin "$origin" \
+          --expect-version "${{ inputs.version }}" --wait 120 || {
+            echo "::error::Smoke test failed. Roll back with: ssh ${{ inputs.user }}@${{ inputs.host }} 'cd /opt/livepitch && ./deploy/rollback.sh'"
+            exit 1
+          }

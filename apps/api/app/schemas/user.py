@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+from app.models.enums import UserRole
 
 
 class UserOut(BaseModel):
@@ -11,7 +13,14 @@ class UserOut(BaseModel):
     id: int
     email: str
     display_name: str | None
+    role: UserRole
     created_at: datetime
+
+
+def _normalise_email(value: str) -> str:
+    """Addresses are matched case-insensitively (the CLI already lowercases): `Bob@x.com` and `bob@x.com` are
+    one account, one rate-limit bucket, one reset target."""
+    return value.strip().lower()
 
 
 class UserRegister(BaseModel):
@@ -19,6 +28,8 @@ class UserRegister(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     password_confirm: str
     display_name: str | None = Field(default=None, max_length=100)
+
+    _lower_email = field_validator("email", mode="after")(_normalise_email)
 
     @model_validator(mode="after")
     def passwords_match(self) -> "UserRegister":
@@ -29,7 +40,9 @@ class UserRegister(BaseModel):
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=256)
+
+    _lower_email = field_validator("email", mode="after")(_normalise_email)
 
 
 class UserUpdate(BaseModel):
@@ -39,6 +52,10 @@ class UserUpdate(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):
@@ -63,6 +80,8 @@ class RefreshRequest(BaseModel):
 
 class PasswordResetRequest(BaseModel):
     email: EmailStr
+
+    _lower_email = field_validator("email", mode="after")(_normalise_email)
 
 
 class PasswordResetRequestOut(BaseModel):

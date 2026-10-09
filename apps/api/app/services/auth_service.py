@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -28,8 +28,14 @@ from app.core.security import (
 )
 from app.models.session import PasswordResetToken, RefreshToken
 from app.models.user import User
+from app.services.email import password_reset_message, send_in_background
+from app.services.metrics import metrics
 
 logger = logging.getLogger(__name__)
+
+# Verified against when the email is unknown, so "no such account" costs the same bcrypt work as "wrong
+# password" and response time does not reveal which emails are registered.
+_TIMING_DECOY_HASH = hash_password("decoy-password-for-constant-time-login")
 
 _LOGIN_ATTEMPTS_PER_EMAIL_WINDOW = 5
 _LOGIN_EMAIL_WINDOW_SECONDS = 60
@@ -45,6 +51,10 @@ class EmailAlreadyRegisteredError(AuthError):
 
 class InvalidCredentialsError(AuthError):
     pass
+
+
+class AccountSuspendedError(AuthError):
+    """Correct credentials, but a moderator has suspended the account."""
 
 
 class RateLimitedError(AuthError):
@@ -77,7 +87,7 @@ class AuthService:
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> tuple[User, IssuedTokens]:
-        existing = await self._db.scalar(select(User).where(User.email == email))
+        existing = await self._by_email(email)
         if existing is not None:
             raise EmailAlreadyRegisteredError()
         user = User(email=email, hashed_password=hash_password(password), display_name=display_name)
@@ -87,6 +97,10 @@ class AuthService:
         logger.info("Registered new user id=%s", user.id)
         tokens = await self._issue_tokens(user, user_agent=user_agent, ip_address=ip_address)
         return user, tokens
+
+    async def _by_email(self, email: str) -> User | None:
+        """Case-insensitive: accounts created before addresses were normalised may be stored mixed-case."""
+        return await self._db.scalar(select(User).where(func.lower(User.email) == email.lower()))
 
     async def _check_login_rate_limit(self, email: str) -> None:
         key = RedisKeys.rate_limit("login-email", email)
@@ -107,10 +121,14 @@ class AuthService:
         ip_address: str | None,
     ) -> tuple[User, IssuedTokens]:
         await self._check_login_rate_limit(email)
-        user = await self._db.scalar(select(User).where(User.email == email))
-        if user is None or not user.is_active or not verify_password(password, user.hashed_password):
+        user = await self._by_email(email)
+        password_ok = verify_password(password, user.hashed_password if user is not None else _TIMING_DECOY_HASH)
+        if user is None or not user.is_active or not password_ok:
             logger.info("Login failed (invalid credentials)")
+            metrics.count("login_failures_total")
             raise InvalidCredentialsError()
+        if user.suspended_at is not None:  # only revealed to someone who proved they own the account
+            raise AccountSuspendedError()
         tokens = await self._issue_tokens(user, user_agent=user_agent, ip_address=ip_address)
         logger.info("User id=%s logged in", user.id)
         return user, tokens
@@ -155,7 +173,7 @@ class AuthService:
             raise InvalidTokenError()
 
         user = await self._db.get(User, row.user_id)
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or user.suspended_at is not None:
             raise InvalidTokenError()
 
         new_tokens = await self._issue_tokens(user, user_agent=user_agent, ip_address=ip_address)
@@ -208,7 +226,7 @@ class AuthService:
         so the response never reveals account existence (Phase 3 §5).
         Returns a dev-only reset URL (never in production) for local
         testing without a real email provider -- see module docstring."""
-        user = await self._db.scalar(select(User).where(User.email == email))
+        user = await self._by_email(email)
         if user is None:
             logger.info("Password reset requested for an unregistered email")
             return None
@@ -224,8 +242,12 @@ class AuthService:
         await self._db.commit()
 
         reset_url = f"/reset-password?token={raw_token}"
-        logger.info("Password reset link for user_id=%s: %s", user.id, reset_url)
-        return reset_url if settings.environment != "production" else None
+        # A live reset token is a credential: it goes to the account's mailbox, and nowhere else.
+        subject, body = password_reset_message(f"{settings.public_site_url.rstrip('/')}{reset_url}")
+        send_in_background(user.email, subject, body)
+        logger.info("Password reset requested for user_id=%s", user.id)
+        # Development convenience (no mail server needed locally); deployed environments never return it.
+        return None if settings.is_deployed else reset_url
 
     async def confirm_password_reset(self, raw_token: str, new_password: str) -> None:
         token_hash = hash_token(raw_token)

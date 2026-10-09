@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -34,3 +35,17 @@ class DeliveryResult:
 class PushSender(ABC):
     @abstractmethod
     async def send(self, device: Device, payload: NotificationPayload) -> DeliveryResult: ...
+
+    async def send_many(self, devices: list[Device], payload: NotificationPayload, *, concurrency: int = 20) -> list[DeliveryResult]:
+        """Deliver one payload to many devices; results are in the order of `devices`. The default sends each
+        device independently with bounded concurrency; a sender whose provider accepts batches overrides this."""
+        gate = asyncio.Semaphore(concurrency)
+
+        async def one(device: Device) -> DeliveryResult:
+            async with gate:
+                try:
+                    return await self.send(device, payload)
+                except Exception:  # one bad device must not abort the fan-out
+                    return DeliveryResult(success=False)
+
+        return list(await asyncio.gather(*(one(d) for d in devices)))

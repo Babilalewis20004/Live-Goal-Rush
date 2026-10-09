@@ -1,39 +1,93 @@
 import type {
+  ArticleAdminOut,
+  ArticleAdminSummary,
+  ArticleDetail,
+  ArticleInput,
+  ArticleStatus,
+  ArticleSummary,
   AuthResponse,
   Capabilities,
+  CategoryOut,
+  CommentOut,
+  CommentPage,
+  CommentTargetType,
   CompetitionOut,
   CompetitionSeasonsOut,
+  ContentNotificationKind,
+  ContentPreferenceOut,
   DeviceOut,
+  DiscoveryHome,
   FavouritesOut,
+  AdPlacementOut,
+  CheckoutOut,
+  EntitlementsOut,
+  FeedOut,
+  InsightRecordOut,
+  MatchComparisonOut,
+  PersonalInsight,
+  PlanOut,
+  PlayerAnalyticsOut,
+  PredictionEvaluationSummary,
+  PredictionOut,
+  ProfileReportOut,
+  SubscriptionOut,
+  TeamAnalyticsOut,
+  FolderOut,
   HeadToHeadOut,
   MatchDetail,
   MatchFormOut,
+  MatchInsightsOut,
   MatchLineupsOut,
   MatchPlayerStatisticsOut,
   MatchStatisticsOut,
   MatchSummary,
+  MediaOut,
+  MyProfileOut,
   NotificationPreferenceOut,
   NotificationScope,
   Page,
   PlayerDetail,
   PlayerOut,
   PlayerStatisticsOut,
+  PollInput,
+  PollOut,
+  ProfileOut,
+  ReactionKind,
+  ReactionSummary,
   RealtimeEventType,
+  ReportOut,
+  RevisionDiff,
+  RevisionOut,
   SearchResults,
+  SearchSuggestions,
   StandingEntry,
+  TagOut,
   TeamDetail,
   TeamFormOut,
+  TeamInjuriesOut,
+  TeamInsightsOut,
   TeamStatisticsOut,
   TopScorersOut,
+  TrackEntity,
+  TrendingOut,
   UserOut,
 } from "@/types/api"
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+const SERVER_API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+/** Where the *browser* reaches the API. Server Components run inside the web
+ * container and use `NEXT_PUBLIC_API_URL` (in Docker: `http://api:8000`, which
+ * a browser cannot resolve), so client-side calls -- login, follows, search
+ * suggestions, view tracking, the editor -- use this instead. Defaults to the
+ * same value, which is right whenever both sides share one address. */
+const BROWSER_API_URL = process.env.NEXT_PUBLIC_BROWSER_API_URL ?? SERVER_API_URL
+const API_BASE_URL = typeof window === "undefined" ? SERVER_API_URL : BROWSER_API_URL
 
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** For a 402: the Premium entitlement the request needed. */
+    public entitlement?: string,
   ) {
     super(message)
     this.name = "ApiError"
@@ -41,22 +95,37 @@ export class ApiError extends Error {
 }
 
 interface ApiFetchOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE"
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
   body?: unknown
+  /** A multipart upload. Sent as-is so the browser sets the boundary. */
+  form?: FormData
   /** Server Components have no browser cookie jar for `credentials` to
    * act on -- callers running there (see `lib/server-auth.ts`) forward
    * the incoming request's `Cookie` header through here explicitly. */
   cookieHeader?: string
+  /** The visitor's address, when a Server Component calls on their behalf, so
+   * the API's per-client rate limits see them rather than this server. Only
+   * honoured by the API for configured trusted proxies. */
+  forwardedFor?: string
 }
+
+/** A request that has not answered by now is treated as a failure, so a slow or half-dead network shows an error
+ * (with retry) instead of a spinner that never ends. Uploads get longer. */
+const REQUEST_TIMEOUT_MS = 15_000
+const UPLOAD_TIMEOUT_MS = 60_000
 
 async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const headers: Record<string, string> = {}
-  if (options.body !== undefined) headers["Content-Type"] = "application/json"
+  if (options.body !== undefined && !options.form) headers["Content-Type"] = "application/json"
   if (options.cookieHeader) headers["Cookie"] = options.cookieHeader
+  if (options.forwardedFor) headers["X-Forwarded-For"] = options.forwardedFor
 
   let res: Response
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), options.form ? UPLOAD_TIMEOUT_MS : REQUEST_TIMEOUT_MS)
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
+      signal: controller.signal,
       method: options.method ?? "GET",
       // Live scores must never be served stale from Next.js's fetch cache;
       // Phase 2's caching layer (Redis, revalidateTag) replaces this.
@@ -67,10 +136,17 @@ async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise
       // why authenticated Server Component reads use `cookieHeader` above.
       credentials: "include",
       headers,
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body: options.form ?? (options.body !== undefined ? JSON.stringify(options.body) : undefined),
     })
   } catch {
-    throw new ApiError(0, "Unable to reach the football data service. Please try again.")
+    throw new ApiError(
+      0,
+      controller.signal.aborted
+        ? "The football data service is taking too long to answer. Please try again."
+        : "Unable to reach the football data service. Please try again.",
+    )
+  } finally {
+    clearTimeout(timer)
   }
 
   if (!res.ok) {
@@ -78,20 +154,31 @@ async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise
       throw new ApiError(404, "Not found")
     }
     let message = "The football data service returned an error. Please try again."
+    let entitlement: string | undefined
     try {
       const body = (await res.json()) as { detail?: unknown }
       if (typeof body?.detail === "string") message = body.detail
+      else if (body?.detail && typeof body.detail === "object" && typeof (body.detail as { message?: unknown }).message === "string") {
+        // 402 Payment Required: { message, entitlement }
+        message = (body.detail as { message: string }).message
+        const needed = (body.detail as { entitlement?: unknown }).entitlement
+        if (typeof needed === "string") entitlement = needed
+      }
+      else if (Array.isArray(body?.detail) && typeof (body.detail[0] as { msg?: unknown })?.msg === "string") {
+        // FastAPI validation errors: surface the first problem, not a generic failure.
+        message = (body.detail[0] as { msg: string }).msg
+      }
     } catch {
       // Body wasn't JSON (or was empty) -- keep the generic message.
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, entitlement)
   }
 
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
-function query(params: Record<string, string | number | undefined>): string {
+function query(params: Record<string, string | number | boolean | undefined>): string {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) search.set(key, String(value))
@@ -148,7 +235,8 @@ export const api = {
   getTeamResults: (id: number, page = 1, pageSize = 50) =>
     apiFetch<Page<MatchSummary>>(`/api/v1/teams/${id}/results${query({ page, page_size: pageSize })}`),
 
-  search: (q: string) => apiFetch<SearchResults>(`/api/v1/search${query({ q })}`),
+  search: (q: string, forwardedFor?: string) =>
+    apiFetch<SearchResults>(`/api/v1/search${query({ q })}`, { forwardedFor }),
 
   // -- Phase 3: auth ----------------------------------------------------------
 
@@ -179,6 +267,11 @@ export const api = {
       method: "POST",
       body: { current_password: currentPassword, new_password: newPassword },
     }),
+  /** Phase 7: everything the account holder has given us, as JSON (never credentials or other people's data). */
+  exportMyData: () => apiFetch<Record<string, unknown>>("/api/v1/users/me/export"),
+  /** Phase 7: irreversible erasure of the account's personal data; needs the current password. */
+  deleteAccount: (password: string) =>
+    apiFetch<void>("/api/v1/users/me", { method: "DELETE", body: { password } }),
 
   // -- Phase 3: favourites ------------------------------------------------------
 
@@ -229,4 +322,229 @@ export const api = {
       `/api/v1/notifications/preferences${query({ scope_type: scopeType, scope_id: scopeId ?? undefined, event_type: eventType })}`,
       { method: "DELETE" },
     ),
+
+  // -- Discovery: news ------------------------------------------------------------
+
+  getArticles: (
+    params: {
+      page?: number
+      pageSize?: number
+      category?: string
+      tag?: string
+      featured?: boolean
+      teamId?: number
+      playerId?: number
+      competitionId?: number
+      matchId?: number
+    } = {},
+  ) =>
+    apiFetch<Page<ArticleSummary>>(
+      `/api/v1/articles${query({
+        page: params.page,
+        page_size: params.pageSize,
+        category: params.category,
+        tag: params.tag,
+        featured: params.featured,
+        team_id: params.teamId,
+        player_id: params.playerId,
+        competition_id: params.competitionId,
+        match_id: params.matchId,
+      })}`,
+    ),
+  getArticle: (slug: string) => apiFetch<ArticleDetail>(`/api/v1/articles/${encodeURIComponent(slug)}`),
+  getRelatedArticles: (slug: string, limit = 4) =>
+    apiFetch<ArticleSummary[]>(`/api/v1/articles/${encodeURIComponent(slug)}/related${query({ limit })}`),
+  getArticleCategories: () => apiFetch<CategoryOut[]>("/api/v1/articles/categories"),
+  getPopularTags: (limit = 20) => apiFetch<TagOut[]>(`/api/v1/articles/tags${query({ limit })}`),
+  getTeamNews: (id: number, page = 1, pageSize = 10) =>
+    apiFetch<Page<ArticleSummary>>(`/api/v1/teams/${id}/news${query({ page, page_size: pageSize })}`),
+  getPlayerNews: (id: number, page = 1, pageSize = 10) =>
+    apiFetch<Page<ArticleSummary>>(`/api/v1/players/${id}/news${query({ page, page_size: pageSize })}`),
+  getCompetitionNews: (id: number, page = 1, pageSize = 10) =>
+    apiFetch<Page<ArticleSummary>>(`/api/v1/competitions/${id}/news${query({ page, page_size: pageSize })}`),
+  getMatchNews: (id: number, page = 1, pageSize = 10) =>
+    apiFetch<Page<ArticleSummary>>(`/api/v1/matches/${id}/news${query({ page, page_size: pageSize })}`),
+
+  // -- Discovery: home, trending, feed ------------------------------------------------
+
+  getDiscoveryHome: () => apiFetch<DiscoveryHome>("/api/v1/discovery/home"),
+  getTrending: (windowHours = 24, limit = 10) =>
+    apiFetch<TrendingOut>(`/api/v1/discovery/trending${query({ window_hours: windowHours, limit })}`),
+  getFeed: (cookieHeader?: string) => apiFetch<FeedOut>("/api/v1/feed", { cookieHeader }),
+
+  // -- Discovery: search ------------------------------------------------------------------
+
+  getSearchSuggestions: (q: string) => apiFetch<SearchSuggestions>(`/api/v1/search/suggestions${query({ q })}`),
+  getPopularSearches: () => apiFetch<{ queries: string[] }>("/api/v1/search/popular"),
+  getRecentSearches: () => apiFetch<{ queries: string[] }>("/api/v1/search/recent"),
+  clearRecentSearches: (q?: string) => apiFetch<void>(`/api/v1/search/recent${query({ query: q })}`, { method: "DELETE" }),
+  trackSearch: (q: string, entityType?: TrackEntity, entityId?: number) =>
+    apiFetch<void>("/api/v1/search/track", {
+      method: "POST",
+      body: { query: q, entity_type: entityType, entity_id: entityId },
+    }),
+  trackView: (entityType: TrackEntity, id: number | string) =>
+    apiFetch<void>("/api/v1/engagement/view", {
+      method: "POST",
+      body:
+        entityType === "article" && typeof id === "string"
+          ? { entity_type: entityType, slug: id }
+          : { entity_type: entityType, entity_id: id },
+    }),
+
+  getContentPreferences: (cookieHeader?: string) =>
+    apiFetch<ContentPreferenceOut[]>("/api/v1/notifications/content-preferences", { cookieHeader }),
+  setContentPreference: (kind: ContentNotificationKind, enabled: boolean) =>
+    apiFetch<ContentPreferenceOut>("/api/v1/notifications/content-preferences", {
+      method: "PUT",
+      body: { kind, enabled },
+    }),
+
+  // -- Editor (requires an editor/admin account) ------------------------------------------------
+
+  listEditorArticles: (status?: ArticleStatus, page = 1) =>
+    apiFetch<Page<ArticleAdminSummary>>(`/api/v1/editor/articles${query({ status, page, page_size: 50 })}`),
+  getEditorArticle: (id: number) => apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}`),
+  getEditorCategories: () => apiFetch<CategoryOut[]>("/api/v1/editor/articles/categories"),
+  createArticle: (input: ArticleInput) =>
+    apiFetch<ArticleAdminOut>("/api/v1/editor/articles", { method: "POST", body: input }),
+  updateArticle: (id: number, input: Partial<ArticleInput>) =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}`, { method: "PATCH", body: input }),
+  setArticleStatus: (id: number, action: "publish" | "unpublish" | "archive") =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/${action}`, { method: "POST" }),
+  deleteArticle: (id: number) => apiFetch<void>(`/api/v1/editor/articles/${id}`, { method: "DELETE" }),
+
+  uploadMedia: (file: File, opts: { folderId?: number; altText?: string } = {}) => {
+    const form = new FormData()
+    form.append("file", file)
+    if (opts.folderId !== undefined) form.append("folder_id", String(opts.folderId))
+    if (opts.altText) form.append("alt_text", opts.altText)
+    return apiFetch<MediaOut>("/api/v1/editor/media", { method: "POST", form })
+  },
+
+  // -- Phase 6: media ------------------------------------------------------------------
+
+  listMedia: (folderId?: number, page = 1) =>
+    apiFetch<Page<MediaOut>>(`/api/v1/editor/media${query({ folder_id: folderId, page, page_size: 30 })}`),
+  updateMedia: (id: number, input: { alt_text?: string; folder_id?: number; move_to_root?: boolean }) =>
+    apiFetch<MediaOut>(`/api/v1/editor/media/${id}`, { method: "PATCH", body: input }),
+  deleteMedia: (id: number) => apiFetch<void>(`/api/v1/editor/media/${id}`, { method: "DELETE" }),
+  listFolders: () => apiFetch<FolderOut[]>("/api/v1/editor/media/folders"),
+  createFolder: (name: string, parentId?: number) =>
+    apiFetch<FolderOut>("/api/v1/editor/media/folders", { method: "POST", body: { name, parent_id: parentId ?? null } }),
+  deleteFolder: (id: number) => apiFetch<void>(`/api/v1/editor/media/folders/${id}`, { method: "DELETE" }),
+  setPlayerPhoto: (playerId: number, mediaId: number | null) =>
+    apiFetch<MediaOut | null>(`/api/v1/editor/media/players/${playerId}/photo`, { method: "PUT", body: { media_id: mediaId } }),
+
+  // -- Phase 6: editorial workflow, scheduling, revisions ------------------------------------
+
+  submitArticle: (id: number) => apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/submit`, { method: "POST" }),
+  withdrawArticle: (id: number) => apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/withdraw`, { method: "POST" }),
+  approveArticle: (id: number, input: { publish_at?: string; unpublish_at?: string } = {}) =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/approve`, { method: "POST", body: input }),
+  rejectArticle: (id: number, note: string) =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/reject`, { method: "POST", body: { note } }),
+  scheduleArticle: (id: number, publishAt: string, unpublishAt?: string) =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/schedule`, {
+      method: "POST",
+      body: { publish_at: publishAt, unpublish_at: unpublishAt ?? null },
+    }),
+  listRevisions: (id: number) => apiFetch<RevisionOut[]>(`/api/v1/editor/articles/${id}/revisions`),
+  compareRevisions: (id: number, from: number, to: number) =>
+    apiFetch<RevisionDiff>(`/api/v1/editor/articles/${id}/revisions/compare${query({ from_version: from, to_version: to })}`),
+  restoreRevision: (id: number, version: number) =>
+    apiFetch<ArticleAdminOut>(`/api/v1/editor/articles/${id}/revisions/${version}/restore`, { method: "POST" }),
+
+  // -- Phase 6: comments & moderation ---------------------------------------------------------
+
+  getComments: (type: CommentTargetType, id: number, opts: { sort?: "newest" | "top"; page?: number; pageSize?: number } = {}) =>
+    apiFetch<CommentPage>(
+      `/api/v1/comments${query({ target_type: type, target_id: id, sort: opts.sort, page: opts.page, page_size: opts.pageSize })}`,
+    ),
+  postComment: (type: CommentTargetType, id: number, body: string, parentId?: number) =>
+    apiFetch<CommentOut>("/api/v1/comments", {
+      method: "POST",
+      body: { target_type: type, target_id: id, body, parent_id: parentId ?? null },
+    }),
+  editComment: (id: number, body: string) =>
+    apiFetch<CommentOut>(`/api/v1/comments/${id}`, { method: "PATCH", body: { body } }),
+  deleteComment: (id: number) => apiFetch<void>(`/api/v1/comments/${id}`, { method: "DELETE" }),
+  likeComment: (id: number) =>
+    apiFetch<{ like_count: number; liked_by_me: boolean }>(`/api/v1/comments/${id}/like`, { method: "PUT" }),
+  unlikeComment: (id: number) =>
+    apiFetch<{ like_count: number; liked_by_me: boolean }>(`/api/v1/comments/${id}/like`, { method: "DELETE" }),
+  reportComment: (id: number, reason: string) =>
+    apiFetch<void>(`/api/v1/comments/${id}/report`, { method: "POST", body: { reason } }),
+  getReports: (status: "open" | "resolved" | "dismissed" = "open", page = 1) =>
+    apiFetch<Page<ReportOut>>(`/api/v1/moderation/reports${query({ status, page, page_size: 20 })}`),
+  moderateComment: (id: number, action: "hide" | "restore" | "delete") =>
+    apiFetch<void>(`/api/v1/moderation/comments/${id}`, { method: "POST", body: { action } }),
+
+  // -- Phase 6: reactions & polls ----------------------------------------------------------------
+
+  getReactions: (type: CommentTargetType, id: number) => apiFetch<ReactionSummary>(`/api/v1/reactions/${type}/${id}`),
+  react: (type: CommentTargetType, id: number, kind: ReactionKind) =>
+    apiFetch<ReactionSummary>(`/api/v1/reactions/${type}/${id}`, { method: "PUT", body: { kind } }),
+  unreact: (type: CommentTargetType, id: number) =>
+    apiFetch<ReactionSummary>(`/api/v1/reactions/${type}/${id}`, { method: "DELETE" }),
+  getPolls: (opts: { matchId?: number; articleId?: number; status?: "open" | "closed"; standalone?: boolean; limit?: number } = {}) =>
+    apiFetch<PollOut[]>(
+      `/api/v1/polls${query({ match_id: opts.matchId, article_id: opts.articleId, status: opts.status, standalone: opts.standalone, limit: opts.limit })}`,
+    ),
+  getPoll: (id: number) => apiFetch<PollOut>(`/api/v1/polls/${id}`),
+  votePoll: (pollId: number, optionId: number) =>
+    apiFetch<PollOut>(`/api/v1/polls/${pollId}/vote`, { method: "POST", body: { option_id: optionId } }),
+  createPoll: (input: PollInput) => apiFetch<PollOut>("/api/v1/editor/polls", { method: "POST", body: input }),
+  closePoll: (id: number) => apiFetch<PollOut>(`/api/v1/editor/polls/${id}/close`, { method: "POST" }),
+  deletePoll: (id: number) => apiFetch<void>(`/api/v1/editor/polls/${id}`, { method: "DELETE" }),
+
+  // -- Phase 6: profiles & insights ------------------------------------------------------------------
+
+  getMyProfile: (cookieHeader?: string) => apiFetch<MyProfileOut>("/api/v1/users/me/profile", { cookieHeader }),
+  updateMyProfile: (input: { profile_public?: boolean; bio?: string | null }) =>
+    apiFetch<MyProfileOut>("/api/v1/users/me/profile", { method: "PATCH", body: input }),
+  getProfile: (id: number) => apiFetch<ProfileOut>(`/api/v1/profiles/${id}`),
+  getTeamInsights: (id: number) => apiFetch<TeamInsightsOut>(`/api/v1/teams/${id}/insights`),
+  getTeamInjuries: (id: number) => apiFetch<TeamInjuriesOut>(`/api/v1/teams/${id}/injuries`),
+  getMatchInsights: (id: number) => apiFetch<MatchInsightsOut>(`/api/v1/matches/${id}/insights`),
+
+  // -- Phase 6b: analytics, predictions, insights ----------------------------------------------------
+  // The server decides what each caller may see (cookies identify them); a 402 carries the missing entitlement.
+
+  getTeamAnalytics: (id: number, opts: { scope?: "overall" | "home" | "away"; window?: number } = {}) =>
+    apiFetch<TeamAnalyticsOut>(`/api/v1/teams/${id}/analytics${query({ scope: opts.scope, window: opts.window })}`),
+  getPlayerAnalytics: (id: number, window?: number) =>
+    apiFetch<PlayerAnalyticsOut>(`/api/v1/players/${id}/analytics${query({ window })}`),
+  getMatchComparison: (id: number) => apiFetch<MatchComparisonOut>(`/api/v1/matches/${id}/comparison`),
+  getMatchPrediction: (id: number) => apiFetch<PredictionOut>(`/api/v1/matches/${id}/prediction`),
+  getExtendedHeadToHead: (id: number, window: "last5" | "last10" | "all") =>
+    apiFetch<HeadToHeadOut>(`/api/v1/matches/${id}/head-to-head/extended${query({ window })}`),
+  getExtendedTeamForm: (id: number, limit: 5 | 10, scope: "overall" | "home" | "away" = "overall") =>
+    apiFetch<TeamFormOut>(`/api/v1/teams/${id}/form/extended${query({ limit, scope })}`),
+  getMatchInsightRecords: (id: number) => apiFetch<InsightRecordOut[]>(`/api/v1/matches/${id}/insight-records`),
+  getPlayerInsights: (id: number) => apiFetch<InsightRecordOut[]>(`/api/v1/players/${id}/insights`),
+  getPredictionEvaluation: () => apiFetch<PredictionEvaluationSummary>("/api/v1/predictions/evaluation"),
+  getMyInsights: () => apiFetch<PersonalInsight[]>("/api/v1/me/insights"),
+
+  // -- Phase 6b: premium ----------------------------------------------------------------------------------
+
+  getEntitlements: () => apiFetch<EntitlementsOut>("/api/v1/me/entitlements"),
+  getPlans: () => apiFetch<PlanOut[]>("/api/v1/subscription/plans"),
+  getSubscription: () => apiFetch<SubscriptionOut>("/api/v1/subscription"),
+  startCheckout: (planCode: string) =>
+    apiFetch<CheckoutOut>("/api/v1/subscription/checkout", { method: "POST", body: { plan_code: planCode } }),
+  cancelSubscription: () => apiFetch<SubscriptionOut>("/api/v1/subscription/cancel", { method: "POST" }),
+  getAdPlacements: (live = false) => apiFetch<AdPlacementOut[]>(`/api/v1/ads/placements${query({ live: live || undefined })}`),
+
+  // -- Phase 6b: moderation ------------------------------------------------------------------------------------
+
+  reportProfile: (userId: number, reason: string) =>
+    apiFetch<void>(`/api/v1/profiles/${userId}/report`, { method: "POST", body: { reason } }),
+  listProfileReports: (status: "open" | "resolved" | "dismissed" = "open", page = 1) =>
+    apiFetch<Page<ProfileReportOut>>(`/api/v1/moderation/profile-reports${query({ status, page })}`),
+  resolveProfileReport: (id: number, action: "resolve" | "dismiss") =>
+    apiFetch<void>(`/api/v1/moderation/profile-reports/${id}/${action}`, { method: "POST" }),
+  suspendUser: (id: number, reason: string) =>
+    apiFetch<void>(`/api/v1/moderation/users/${id}/suspend`, { method: "POST", body: { reason } }),
+  unsuspendUser: (id: number) => apiFetch<void>(`/api/v1/moderation/users/${id}/unsuspend`, { method: "POST" }),
 }

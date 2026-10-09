@@ -1,4 +1,5 @@
-import { Image, StyleSheet, Text, View } from "react-native"
+import { Image } from "expo-image"
+import { StyleSheet, Text, View } from "react-native"
 import { badgeStyleFor, shortCodeFor } from "@/lib/colors"
 
 export function TeamBadge({
@@ -14,10 +15,15 @@ export function TeamBadge({
 }) {
   if (logoUrl) {
     return (
+      // expo-image keeps crests in memory and on disk: a livescore list shows the same few dozen crests over and
+      // over, and the built-in Image re-decodes them (and on Android may refetch them) as rows scroll in and out.
       <Image
         source={{ uri: logoUrl }}
         style={{ width: size, height: size, borderRadius: size / 2 }}
-        resizeMode="contain"
+        contentFit="contain"
+        cachePolicy="memory-disk"
+        recyclingKey={logoUrl}
+        accessibilityLabel={`${name} crest`}
       />
     )
   }

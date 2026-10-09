@@ -4,7 +4,7 @@ import hashlib
 import logging
 from datetime import datetime, time, timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -26,6 +26,7 @@ from app.schemas.standing import StandingEntry
 from app.schemas.team import TeamDetail, TeamOut
 from app.services.cache import CacheAside
 from app.services.pagination import paginate
+from app.services.search_ranking import FUZZY, FUZZY_MIN_LENGTH, escape_like, matches, normalize_query, similarity, tier
 from app.services.providers.base import FootballDataProvider
 from app.services.providers.schemas import ProviderMatch, ProviderMatchEvent
 from app.services.season import current_season_label, is_requestable_past_season
@@ -57,7 +58,7 @@ def _synthetic_event_key(match_provider_id: str, event: ProviderMatchEvent, inde
     supply its own id (Phase 2 §25): a hash of the fields that make an
     event distinct, plus its position in the provider's event list as a
     tiebreaker (e.g. two same-minute, same-team cards with no player
-    attached). The bundled mock provider always supplies its own id; this
+    attached). Most providers supply their own id; this
     exists for providers that don't."""
     basis = "|".join(
         [
@@ -69,7 +70,7 @@ def _synthetic_event_key(match_provider_id: str, event: ProviderMatchEvent, inde
             str(index),
         ]
     )
-    return hashlib.sha1(basis.encode()).hexdigest()[:24]
+    return hashlib.sha1(basis.encode(), usedforsecurity=False).hexdigest()[:24]
 
 
 class FootballService:
@@ -388,7 +389,18 @@ class FootballService:
 
     async def list_competitions(self, page: int, page_size: int) -> tuple[list[CompetitionOut], int]:
         async def _load() -> list[CompetitionOut]:
-            provider_competitions = await self.provider.get_competitions()
+            # Reads serve what the sync jobs stored (Phase 2 §5). Asking the provider on a cache miss meant a
+            # provider outage -- or a Redis outage, which makes every request a miss -- turned this endpoint
+            # into a 500 and spent the provider's daily quota on page views. The provider is only consulted on
+            # a brand-new database that has not been seeded yet.
+            stored = (await self.db.scalars(select(Competition).order_by(Competition.name))).all()
+            if stored:
+                return [CompetitionOut.model_validate(c) for c in stored]
+            try:
+                provider_competitions = await self.provider.get_competitions()
+            except Exception:  # noqa: BLE001 -- an unseeded database plus a provider outage: empty list, not a 500
+                logger.warning("competitions: database empty and the provider is unavailable", exc_info=True)
+                return []
             competitions = [await self._sync_competition(pc) for pc in provider_competitions]
             await self.db.commit()
             competitions.sort(key=lambda c: c.name)
@@ -574,22 +586,32 @@ class FootballService:
 
     # -- search -------------------------------------------------------------
 
-    async def search(self, query: str) -> SearchResults:
+    async def search(self, query: str, limit: int = 10) -> SearchResults:
         # Deliberately not cached/background-synced: an arbitrary query
         # string has no fixed cache key a sync job could pre-warm, and
         # search is inherently interactive (spec §4's cache list doesn't
         # include it).
-        query = query.strip()
+        query = normalize_query(query)
         if not query:
             return SearchResults()
 
-        local = await self._search_database(query)
+        local = await self._search_database(query, limit=limit)
         if local.teams or local.competitions or local.players or local.matches:
             return local
+        if len(query) < FUZZY_MIN_LENGTH:
+            # Never spend provider quota on a one/two-character probe.
+            return local
 
-        # Nothing stored matches: ask the provider (it may know entities
-        # the background syncs haven't reached yet).
-        results = await self.provider.search(query)
+        # Nothing stored matches: ask the provider (it may know entities the background syncs haven't reached
+        # yet) -- but search must keep working when it can't answer: a provider outage returns the (empty)
+        # local result, and a shared per-minute budget stops a stream of nonsense queries draining the quota.
+        if not await self._search_fallback_allowed():
+            return local
+        try:
+            results = await self.provider.search(query)
+        except Exception:
+            logger.warning("Provider search unavailable; returning stored results only", exc_info=True)
+            return local
 
         teams = [await self._sync_team(t) for t in results.teams]
         competitions = [await self._sync_competition(c) for c in results.competitions]
@@ -602,37 +624,70 @@ class FootballService:
             players=[PlayerOut.model_validate(p) for p in players],
         )
 
-    async def _search_database(self, query: str, limit: int = 10) -> SearchResults:
-        """Phase 4 §24: search what is already stored, using the trigram
-        indexes on the name columns (`ILIKE '%q%'` is index-assisted for
-        3+ character queries) and the team-id indexes for matches -- every
-        query is LIMITed, nothing scans a table unbounded."""
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
+    async def _search_fallback_allowed(self) -> bool:
+        if self.cache is None:
+            return False
+        try:
+            used = await self.cache.redis.incr(RedisKeys.sync_requested("budget", "search"), ttl_seconds=60)
+        except Exception:
+            return False
+        return used <= settings.search_provider_fallbacks_per_minute
 
+    async def _search_database(self, query: str, limit: int = 10) -> SearchResults:
+        """Search what is already stored, ranked exact > prefix > contains >
+        fuzzy (`search_ranking`), using the trigram indexes on the name
+        columns and the team-id indexes for matches. Every query is LIMITed,
+        nothing scans a table unbounded."""
+        short_prefix = f"{escape_like(query.lower())}%"
+        team_tier = func.least(
+            tier(Team.name, query),
+            case((Team.short_name.is_(None), FUZZY), else_=tier(Team.short_name, query)),
+        )
+        team_filter = matches(Team.name, query) | (
+            Team.short_name.is_not(None) & func.lower(Team.short_name).like(short_prefix, escape="\\")
+        )
         teams = (
-            (await self.db.execute(select(Team).where(Team.name.ilike(pattern, escape="\\")).order_by(Team.name).limit(limit)))
+            (
+                await self.db.execute(
+                    select(Team)
+                    .where(team_filter)
+                    .order_by(team_tier, similarity(Team.name, query).desc(), Team.name)
+                    .limit(limit)
+                )
+            )
             .scalars()
             .all()
         )
         competitions = (
             (
                 await self.db.execute(
-                    select(Competition).where(Competition.name.ilike(pattern, escape="\\")).order_by(Competition.name).limit(limit)
+                    select(Competition)
+                    .where(matches(Competition.name, query))
+                    .order_by(tier(Competition.name, query), similarity(Competition.name, query).desc(), Competition.name)
+                    .limit(limit)
                 )
             )
             .scalars()
             .all()
         )
         players = (
-            (await self.db.execute(select(Player).where(Player.name.ilike(pattern, escape="\\")).order_by(Player.name).limit(limit)))
+            (
+                await self.db.execute(
+                    select(Player)
+                    .where(matches(Player.name, query))
+                    .order_by(tier(Player.name, query), similarity(Player.name, query).desc(), Player.name)
+                    .limit(limit)
+                )
+            )
             .scalars()
             .all()
         )
 
-        matches: list[Match] = []
+        found_matches: list[Match] = []
         if teams:
-            ids = [t.id for t in teams]
+            # Matches of the *best-ranked* few teams only: a query like "man"
+            # matches many clubs and should not flood the match list.
+            ids = [t.id for t in teams[:3]]
             stmt = (
                 select(Match)
                 .where(or_(Match.home_team_id.in_(ids), Match.away_team_id.in_(ids)))
@@ -642,11 +697,11 @@ class FootballService:
                 .order_by(func.abs(func.extract("epoch", Match.kickoff_time - func.now())))
                 .limit(limit)
             )
-            matches = list((await self.db.execute(stmt)).scalars().all())
+            found_matches = list((await self.db.execute(stmt)).scalars().all())
 
         return SearchResults(
             teams=[TeamOut.model_validate(t) for t in teams],
             competitions=[CompetitionOut.model_validate(c) for c in competitions],
             players=[PlayerOut.model_validate(p) for p in players],
-            matches=[MatchSummary.model_validate(m) for m in matches],
+            matches=[MatchSummary.model_validate(m) for m in found_matches],
         )

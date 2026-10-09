@@ -2,7 +2,8 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.api.deps import FootballServiceDep, PaginationDep, TeamPlayerServiceDep
+from app.api.deps import ArticleServiceDep, FootballServiceDep, PaginationDep, TeamPlayerServiceDep
+from app.schemas.article import ArticleSummary
 from app.schemas.common import Page
 from app.schemas.competition import CompetitionOut, CompetitionSeasonsOut
 from app.schemas.match import MatchSummary
@@ -80,5 +81,15 @@ async def get_competition_seasons(competition_id: int, service: FootballServiceD
     """Seasons we hold data for (newest first) -- feeds the season selector."""
     try:
         return await service.get_competition_seasons(competition_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Competition not found") from exc
+
+
+@router.get("/{competition_id}/news", response_model=Page[ArticleSummary])
+async def get_competition_news(competition_id: int, articles: ArticleServiceDep, pagination: PaginationDep) -> Page[ArticleSummary]:
+    """Published articles explicitly linked to this competition."""
+    page, page_size = pagination
+    try:
+        return await articles.list_for_competition(competition_id, page, page_size)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="Competition not found") from exc

@@ -1,0 +1,190 @@
+# Starting-point alerts. Prometheus evaluates and shows them (Alerts tab); wiring them
+# to Alertmanager / a pager is a deployment decision and is not included.
+groups:
+  - name: livepitch
+    rules:
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: The API is not answering /metrics
+
+      - alert: HighServerErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 5% of requests are failing with a 5xx
+
+      - alert: SlowRequests
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: API p95 latency is above one second
+
+      - alert: CeleryBacklog
+        expr: celery_queue_length > 200
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Background tasks are piling up - are the workers running?
+
+      - alert: CeleryTaskFailures
+        expr: sum(rate(celery_task_failures_total[10m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Background tasks are failing
+
+      - alert: NotificationFailures
+        expr: sum(rate(notifications_failed_total[15m])) / (sum(rate(notifications_sent_total[15m])) + sum(rate(notifications_failed_total[15m]))) > 0.5
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Over half of push notifications are failing to deliver
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: The Redis exporter cannot reach Redis
+
+      - alert: WebhookSignatureRejections
+        expr: sum(rate(payment_webhooks_rejected_total[10m])) > 0.2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Payment webhooks are being rejected - a misconfigured secret, or probing
+
+      - alert: PaymentFailures
+        expr: sum(increase(subscription_payment_failed_total[1h])) > 5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Several subscription payments failed in the last hour
+
+      - alert: AnalyticsGenerationFailing
+        expr: sum(rate(analytics_generation_failures_total[15m])) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Analytics generation is failing - check the worker logs
+
+  # -- Phase 7 production alerts ------------------------------------------------------------------------------------
+  # Every rule has a `for:` so a single blip never pages anyone. Severity: critical = a human now; warning = look today.
+  # Runbooks live in docs/runbooks/.
+  - name: livepitch-production
+    rules:
+      - alert: DatabaseUnreachable
+        expr: app_dependency_up{dependency="database"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: The API cannot reach PostgreSQL
+          runbook: docs/runbooks/database-outage.md
+
+      - alert: RedisUnreachableFromApi
+        expr: app_dependency_up{dependency="redis"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: The API cannot reach Redis (reads still work from Postgres; live updates, rate limits and the job queue do not)
+          runbook: docs/runbooks/redis-outage.md
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: sum(rate(db_pool_exhausted_total[5m])) > 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Requests are being refused with 503 because every database connection is busy
+          runbook: docs/runbooks/api-outage.md
+
+      - alert: ApiErrorBudgetBurn
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.02
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: More than 2% of API requests have failed with a 5xx for five minutes
+          runbook: docs/runbooks/api-outage.md
+
+      - alert: ApiLatencyP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{route!~"/metrics|/health.*"}[5m]))) > 3
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: API p99 latency has been above 3 seconds for ten minutes - scale API workers (docs/operations/capacity.md)
+
+      - alert: FootballLiveDataStale
+        expr: football_live_data_age_seconds > 300
+        for: 3m
+        labels: {severity: critical}
+        annotations:
+          summary: A live match has not been synced from the football provider for over five minutes
+          runbook: docs/runbooks/provider-outage.md
+
+      - alert: FootballProviderFailing
+        expr: sum(rate(provider_errors_total[10m])) / clamp_min(sum(rate(provider_requests_total[10m])), 0.001) > 0.5
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: More than half of football provider requests are failing (outage, bad key, or quota)
+          runbook: docs/runbooks/provider-outage.md
+
+      - alert: CeleryWorkerSilent
+        expr: sum(rate(celery_tasks_total[10m])) == 0 and sum(celery_queue_length) > 5
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: Tasks are queued but no worker is finishing any - the worker is down or wedged
+          runbook: docs/runbooks/celery-backlog.md
+
+      - alert: FailedJobsNeedAttention
+        expr: failed_jobs_unresolved > 20
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: Background jobs have failed for good and are waiting for an administrator (GET /api/v1/admin/failed-jobs)
+          runbook: docs/runbooks/celery-backlog.md
+
+      - alert: WebSocketClientsBeingEvicted
+        expr: sum(rate(websocket_clients_evicted_total[10m])) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Many WebSocket clients cannot keep up and are being disconnected
+          runbook: docs/runbooks/websocket-outage.md
+
+      - alert: PaymentWebhookProcessingFailing
+        expr: increase(payment_webhooks_failed_total[15m]) > 0
+        for: 15m
+        labels: {severity: critical}
+        annotations:
+          summary: Payment webhooks verified but could not be processed (the processor will retry; entitlements may lag)
+          runbook: docs/runbooks/payment-webhook-failure.md
+
+      - alert: LoginFailureSpike
+        expr: sum(rate(login_failures_total[5m])) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Sustained failed sign-ins - credential stuffing or a broken client
+          runbook: docs/runbooks/security-incident.md
+
+      - alert: BackupStale
+        # backup.sh writes this metric for the node-exporter textfile collector (BACKUP_METRICS_FILE); 93,600 s = 26 h
+        expr: time() - backup_last_success_timestamp_seconds > 93600
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: No successful database backup in the last 26 hours
+          runbook: docs/runbooks/backup-restoration.md
+
+      - alert: BackupMetricMissing
+        expr: absent(backup_last_success_timestamp_seconds)
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: Backup success is not being reported at all - monitoring for backups is not wired up

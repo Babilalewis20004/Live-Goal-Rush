@@ -99,6 +99,7 @@ export interface SearchResults {
   competitions: CompetitionOut[]
   players: PlayerOut[]
   matches: MatchSummary[]
+  articles: ArticleSummary[]
 }
 
 export interface Page<T> {
@@ -123,6 +124,11 @@ export type RealtimeEventType =
   | "MATCH_CANCELLED"
   | "LINEUP_UPDATED"
   | "STATISTICS_UPDATED"
+  | "comment.created"
+  | "comment.reaction"
+  | "poll.updated"
+  | "match.insight.updated"
+  | "prediction.updated"
 
 export interface RealtimeMatchEvent {
   id: number
@@ -159,6 +165,8 @@ export interface UserOut {
   id: number
   email: string
   display_name: string | null
+  /** "editor" and "admin" may use the editor tools; granted by an operator. */
+  role: "user" | "author" | "editor" | "admin"
   created_at: string
 }
 
@@ -409,6 +417,29 @@ export interface TeamFormOut {
   limit: number
   results: FormResultOut[]
   sequence: string
+  summary?: FormSummaryOut | null
+}
+
+export interface FormSummaryOut {
+  played: number
+  requested: number
+  wins: number
+  draws: number
+  losses: number
+  goals_for: number
+  goals_against: number
+  clean_sheets: number
+  failed_to_score: number
+  points: number
+  scoring_streak: number
+  unbeaten_streak: number
+  win_streak: number
+  clean_sheet_streak: number
+  ppg: number | null
+  goals_for_per_match: number | null
+  goals_against_per_match: number | null
+  complete: boolean
+  limitation: string | null
 }
 
 export interface MatchFormOut {
@@ -431,13 +462,22 @@ export interface HeadToHeadMeetingOut {
 export interface HeadToHeadOut {
   home_team_id: number
   away_team_id: number
-  limit: number
+  limit: number | null
+  window?: "last5" | "last10" | "all"
   period_start: string
   before: string
   meetings: HeadToHeadMeetingOut[]
   home_team_wins: number
   draws: number
   away_team_wins: number
+  total_meetings?: number
+  home_team_goals?: number
+  away_team_goals?: number
+  average_goals?: number | null
+  /** The match's home team's results in these meetings, oldest to newest. */
+  recent_form?: string
+  complete?: boolean
+  limitation?: string | null
 }
 
 /** `GET /competitions/{id}/seasons` -- feeds the season selector. */
@@ -449,4 +489,620 @@ export interface CompetitionSeasonsOut {
   /** If true, asking for a season not in `seasons` queues a background sync
    * and it shows up shortly (the immediate answer is empty). */
   historical_supported: boolean
+}
+
+// -- Discovery: news, unified search, trending, personalised feed ---------------
+
+export interface CategoryOut {
+  id: number
+  slug: string
+  name: string
+  /** Set when the category *is* a competition ("Premier League"). */
+  competition_id: number | null
+}
+
+export interface TagOut {
+  id: number
+  slug: string
+  name: string
+}
+
+export interface ArticleSummary {
+  id: number
+  slug: string
+  title: string
+  excerpt: string
+  featured_image_url: string | null
+  featured_image_alt: string | null
+  published_at: string | null
+  category: CategoryOut | null
+  /** Display name only -- never an email address. */
+  author_name: string | null
+  tags: TagOut[]
+  /** On an entity's news list: how it relates ("match" | "team" | "competition"). */
+  relation: string | null
+  /** On related-article lists: why it was suggested. */
+  reason: string | null
+}
+
+export interface ContentBlock {
+  type: "heading" | "paragraph" | "list_item" | "quote"
+  text: string
+}
+
+export interface ArticleDetail extends ArticleSummary {
+  /** Sanitized HTML (server-side allow-list) -- safe to render as-is. */
+  content: string
+  /** The same body as blank-line separated plain-text paragraphs. */
+  content_text: string
+  /** The same body as typed blocks, for native rendering. */
+  content_blocks: ContentBlock[]
+  updated_at: string
+  view_count: number
+  canonical_path: string
+  teams: TeamOut[]
+  players: PlayerOut[]
+  competitions: CompetitionOut[]
+  matches: MatchSummary[]
+  gallery: GalleryImage[]
+}
+
+export type ArticleStatus = "draft" | "in_review" | "scheduled" | "published" | "archived"
+
+export interface ArticleAdminOut extends ArticleDetail {
+  status: ArticleStatus
+  is_featured: boolean
+  author_id: number | null
+  publish_at: string | null
+  unpublish_at: string | null
+  review_note: string | null
+  featured_media_id: number | null
+}
+
+export interface ArticleAdminSummary extends ArticleSummary {
+  status: ArticleStatus
+  is_featured: boolean
+}
+
+export interface ArticleInput {
+  title: string
+  excerpt?: string
+  content?: string
+  featured_image_url?: string | null
+  featured_image_alt?: string | null
+  category_id?: number | null
+  tags?: string[]
+  team_ids?: number[]
+  player_ids?: number[]
+  competition_ids?: number[]
+  match_ids?: number[]
+  is_featured?: boolean
+  status?: ArticleStatus
+  publish_at?: string | null
+  unpublish_at?: string | null
+  featured_media_id?: number | null
+  gallery?: { media_id: number; caption?: string }[]
+}
+
+export interface Trending<T> {
+  item: T
+  score: number
+  /** What contributed, e.g. {views: 12, live_matches: 1} -- the ranking is explainable. */
+  signals: Record<string, number>
+}
+
+export interface TrendingOut {
+  window_hours: number
+  teams: Trending<TeamOut>[]
+  players: Trending<PlayerOut>[]
+  competitions: Trending<CompetitionOut>[]
+  articles: Trending<ArticleSummary>[]
+}
+
+export interface DiscoveryHome {
+  latest_results: MatchSummary[]
+  featured_articles: ArticleSummary[]
+  latest_articles: ArticleSummary[]
+  trending_teams: Trending<TeamOut>[]
+  trending_players: Trending<PlayerOut>[]
+  trending_articles: Trending<ArticleSummary>[]
+  popular_competitions: CompetitionOut[]
+  generated_at: string
+}
+
+export type FeedReason =
+  | "live_followed_match"
+  | "followed_team_today"
+  | "followed_competition_today"
+  | "followed_team_upcoming"
+  | "followed_competition_upcoming"
+  | "recent_result"
+  | "news_followed_team"
+  | "news_followed_competition"
+  | "news_searched"
+  | "community_match"
+  | "community_article"
+  | "trending"
+  | "latest"
+
+export interface FeedItem {
+  kind: "match" | "article"
+  reason: FeedReason
+  /** Human readable, e.g. "Liverpool is playing today". */
+  explanation: string
+  /** 1 = most relevant tier. */
+  rank: number
+  match: MatchSummary | null
+  article: ArticleSummary | null
+}
+
+export interface FeedOut {
+  items: FeedItem[]
+  /** False when the user follows nothing yet: the feed is the general one. */
+  personalised: boolean
+}
+
+export interface SearchSuggestion {
+  type: "team" | "player" | "competition" | "article"
+  id: number
+  label: string
+  /** Articles are addressed by slug. */
+  slug: string | null
+}
+
+export interface SearchSuggestions {
+  query: string
+  suggestions: SearchSuggestion[]
+}
+
+export type ContentNotificationKind =
+  | "team_news"
+  | "competition_news"
+  | "match_reports"
+  | "transfer_news"
+  | "general_news"
+  | "comment_replies"
+  | "poll_results"
+  | "editorial_updates"
+  | "prediction_available"
+  | "team_insights"
+  | "poll_closing"
+  | "subscription_events"
+
+export interface ContentPreferenceOut {
+  kind: ContentNotificationKind
+  enabled: boolean
+  /** What applies when the user hasn't chosen (always off). */
+  default: boolean
+}
+
+export type TrackEntity = "article" | "team" | "player" | "competition" | "match"
+
+// -- Phase 6: media, workflow, community, profiles, insights ---------------------
+
+export interface MediaVariantOut {
+  url: string
+  width: number
+  height: number
+  size_bytes: number
+}
+
+/** Ids, dimensions and URLs only -- never a storage key or filesystem path. */
+export interface MediaOut {
+  id: number
+  folder_id: number | null
+  filename: string
+  alt_text: string
+  width: number
+  height: number
+  size_bytes: number
+  created_at: string
+  /** The `large` variant. */
+  url: string
+  thumb_url: string
+  variants: Record<string, MediaVariantOut>
+}
+
+export interface FolderOut {
+  id: number
+  name: string
+  parent_id: number | null
+  media_count: number
+}
+
+export interface GalleryImage {
+  media_id: number
+  url: string
+  thumb_url: string
+  alt: string
+  width: number
+  height: number
+  caption: string
+}
+
+export interface RevisionOut {
+  version: number
+  action: "create" | "update" | "status" | "restore" | "scheduled"
+  /** Display name; null for system changes (scheduled publishing). */
+  editor_name: string | null
+  created_at: string
+  changes: string[]
+}
+
+export interface FieldChange {
+  field: string
+  before: unknown
+  after: unknown
+}
+
+export interface DiffLine {
+  kind: "add" | "del" | "ctx"
+  text: string
+}
+
+export interface RevisionDiff {
+  article_id: number
+  from_version: number
+  to_version: number
+  changes: FieldChange[]
+  content_diff: DiffLine[]
+}
+
+export interface CommentAuthor {
+  id: number
+  display_name: string
+  profile_public: boolean
+}
+
+export interface CommentOut {
+  id: number
+  author: CommentAuthor | null
+  body: string
+  created_at: string
+  edited_at: string | null
+  like_count: number
+  reply_count: number
+  removed: boolean
+  parent_id: number | null
+  liked_by_me: boolean
+  mine: boolean
+  replies: CommentOut[]
+}
+
+export interface CommentPage {
+  items: CommentOut[]
+  /** Top-level comments. */
+  total: number
+  /** Every visible comment including replies. */
+  total_comments: number
+  page: number
+  page_size: number
+}
+
+export type CommentTargetType = "article" | "match"
+
+export interface ReportOut {
+  id: number
+  comment_id: number
+  comment_body: string
+  comment_status: "visible" | "hidden" | "deleted"
+  comment_author: string
+  target_type: CommentTargetType
+  target_id: number
+  reason: string
+  status: "open" | "resolved" | "dismissed"
+  created_at: string
+  report_count: number
+}
+
+export type ReactionKind = "thumbs_up" | "fire" | "wow" | "goal" | "heart" | "laugh" | "clap"
+
+export interface ReactionSummary {
+  counts: Record<ReactionKind, number>
+  total: number
+  mine: ReactionKind | null
+}
+
+export interface PollOptionOut {
+  id: number
+  label: string
+  votes: number
+  percent: number
+}
+
+export interface PollOut {
+  id: number
+  question: string
+  kind: "match" | "transfer" | "question"
+  status: "open" | "closed"
+  match_id: number | null
+  article_id: number | null
+  closes_at: string | null
+  total_votes: number
+  options: PollOptionOut[]
+  my_vote: number | null
+  winner_option_id: number | null
+}
+
+export interface PollInput {
+  question: string
+  kind: "match" | "transfer" | "question"
+  options: string[]
+  match_id?: number | null
+  article_id?: number | null
+  closes_at?: string | null
+}
+
+export interface Badge {
+  key: string
+  label: string
+  description: string
+}
+
+export interface ActivityItem {
+  kind: "comment"
+  text: string
+  target_type: CommentTargetType
+  target_id: number
+  target_label: string
+  target_slug: string | null
+  created_at: string
+}
+
+export interface ProfileOut {
+  id: number
+  display_name: string
+  bio: string | null
+  joined: string
+  badges: Badge[]
+  stats: { comments: number; poll_votes: number; followed_teams: number; followed_competitions: number }
+  favourite_teams: { id: number; name: string }[]
+  favourite_competitions: { id: number; name: string }[]
+  activity: ActivityItem[]
+}
+
+export interface MyProfileOut extends ProfileOut {
+  profile_public: boolean
+  role: string
+}
+
+export interface Insight {
+  key: string
+  text: string
+  value: number | null
+}
+
+export interface InjuryOut {
+  player_name: string
+  photo_url: string | null
+  /** "missing" = ruled out, "doubtful" = questionable. */
+  kind: "missing" | "doubtful"
+  reason: string | null
+  /** Kickoff of the match the absence applies to. */
+  match_date: string | null
+}
+
+export interface TeamInjuriesOut {
+  /** False when the data provider has no injury feed. */
+  supported: boolean
+  items: InjuryOut[]
+}
+
+export interface TeamInsightsOut {
+  team_id: number
+  team_name: string
+  sample_size: number
+  insights: Insight[]
+}
+
+export interface MatchInsightsOut {
+  match_id: number
+  home: TeamInsightsOut
+  away: TeamInsightsOut
+  head_to_head: Insight[]
+  note: string
+}
+
+// -- Phase 6b: analytics, predictions, billing -------------------------------------------------
+
+export interface Stat {
+  /** null = the provider never supplied it; never shown as 0. */
+  value: number | null
+  /** How many matches contributed. */
+  sample: number
+}
+
+export type AnalyticsTier = "basic" | "full"
+
+export interface RecordOut {
+  played: number
+  wins: number
+  draws: number
+  losses: number
+  points: number
+  points_per_match: number | null
+}
+
+export interface TeamAnalyticsOut {
+  team_id: number
+  team_name: string
+  scope: "overall" | "home" | "away"
+  window: number
+  matches_considered: number
+  data_timestamp: string | null
+  generated_at: string
+  tier: AnalyticsTier
+  record: RecordOut
+  attack: Record<string, Stat>
+  possession: Record<string, Stat>
+  defence: Record<string, Stat>
+  discipline: Record<string, Stat>
+  unavailable: string[]
+  locked: string[]
+  limitations: string[]
+}
+
+export interface PlayerMatchLine {
+  match_id: number
+  kickoff_time: string
+  opponent: string
+  minutes: number | null
+  goals: number | null
+  assists: number | null
+  shots: number | null
+  shots_on_target: number | null
+  key_passes: number | null
+  tackles: number | null
+  yellow_cards: number | null
+  red_cards: number | null
+}
+
+export interface PlayerSeasonLine {
+  competition_id: number
+  competition_name: string
+  season: string
+  appearances: number | null
+  goals: number
+  assists: number | null
+}
+
+export interface PlayerAnalyticsOut {
+  player_id: number
+  player_name: string
+  generated_at: string
+  tier: AnalyticsTier
+  seasons: PlayerSeasonLine[]
+  window: number
+  matches_with_statistics: number
+  totals: Record<string, Stat>
+  per_90: Record<string, Stat>
+  recent: PlayerMatchLine[]
+  form_goal_involvements: number[]
+  unavailable: string[]
+  locked: string[]
+  limitations: string[]
+}
+
+export interface ComparisonRow {
+  key: string
+  label: string
+  home: number | null
+  away: number | null
+  /** null = neutral (e.g. possession). */
+  higher_is_better: boolean | null
+  home_sample: number
+  away_sample: number
+  premium: boolean
+}
+
+export interface MatchComparisonOut {
+  match_id: number
+  home_team: TeamOut
+  away_team: TeamOut
+  generated_at: string
+  tier: AnalyticsTier
+  form_window: number
+  home_form: FormSummaryOut | null
+  away_form: FormSummaryOut | null
+  home_sequence: string
+  away_sequence: string
+  head_to_head: HeadToHeadOut | null
+  rows: ComparisonRow[]
+  locked: string[]
+  limitations: string[]
+}
+
+export interface PredictionOut {
+  match_id: number
+  status: "available" | "insufficient_data" | "unavailable"
+  label: string
+  disclaimer: string
+  model_version: string | null
+  generated_at: string | null
+  data_timestamp: string | null
+  confidence: "low" | "medium" | "high" | null
+  confidence_score: number | null
+  home_win: number | null
+  draw: number | null
+  away_win: number | null
+  expected_total_goals: number | null
+  expected_home_goals: number | null
+  expected_away_goals: number | null
+  influences: string[]
+  factors: Record<string, number> | null
+  locked: string[]
+  reason: string | null
+}
+
+export interface InsightRecordOut {
+  entity_type: "team" | "player" | "match"
+  entity_id: number
+  insight_type: string
+  text: string
+  value: number | null
+  source_data_version: string
+  generated_at: string
+}
+
+export interface PersonalInsight {
+  key: string
+  text: string
+  entity_type: "match" | "competition"
+  entity_id: number
+}
+
+export interface PlanOut {
+  code: string
+  name: string
+  interval: "month" | "year"
+  price_minor: number
+  currency: string
+  entitlements: string[]
+}
+
+export interface EntitlementsOut {
+  entitlements: string[]
+  premium: boolean
+  features: { key: string; label: string }[]
+}
+
+export interface SubscriptionOut {
+  status: "none" | "incomplete" | "active" | "past_due" | "cancelled" | "expired"
+  plan: string | null
+  entitlements: string[]
+  current_period_end: string | null
+  cancel_at_period_end: boolean
+}
+
+export interface CheckoutOut {
+  url: string
+  session_id: string
+}
+
+export interface AdPlacementOut {
+  placement: "home" | "news" | "match_centre"
+  eligible: boolean
+  reason: string
+}
+
+export interface PredictionEvaluationSummary {
+  model_version: string
+  evaluated: number
+  accuracy: number | null
+  mean_brier_score: number | null
+  baseline_brier_score: number
+  beats_baseline: boolean | null
+  mean_total_goals_error: number | null
+  calibration_home_win: { low: number; high: number; count: number; mean_predicted: number | null; observed_rate: number | null }[]
+  note: string
+}
+
+export interface ProfileReportOut {
+  id: number
+  profile_user_id: number
+  display_name: string
+  reason: string
+  status: "open" | "resolved" | "dismissed"
+  created_at: string
+  suspended: boolean
 }

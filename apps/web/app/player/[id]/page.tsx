@@ -1,10 +1,17 @@
+import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import Link from "next/link"
+import { cache } from "react"
 import { AnimatedBackground } from "@/components/animated-background"
 import { MatchCard } from "@/components/match-card"
+import { PlayerAnalytics } from "@/components/analytics/player-analytics"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
+import { TrackView } from "@/components/news/track-view"
 import { TeamBadge } from "@/components/team-badge"
 import { EmptyState } from "@/components/ui/empty-state"
 import { api, ApiError } from "@/lib/api"
+import { absoluteUrl, jsonLdScript, playerJsonLd, playerMetadata } from "@/lib/seo"
 import type { PlayerMatchStatsOut } from "@/types/api"
 
 export const dynamic = "force-dynamic"
@@ -30,31 +37,48 @@ function matchLine(stats: PlayerMatchStatsOut): string {
   return parts.join(" · ")
 }
 
+const loadPlayer = cache(async (playerId: number) => {
+  try {
+    return await api.getPlayer(playerId)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+})
+
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
+  const playerId = Number((await params).id)
+  const player = Number.isInteger(playerId) ? await loadPlayer(playerId) : null
+  if (!player) return { title: "Player not found", robots: { index: false, follow: false } }
+  return playerMetadata(player)
+}
+
 export default async function PlayerPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const playerId = Number(id)
   if (!Number.isInteger(playerId)) notFound()
 
-  let player
-  try {
-    player = await api.getPlayer(playerId)
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) notFound()
-    throw error
-  }
-  const [statistics, capabilities] = await Promise.all([
+  const player = await loadPlayer(playerId)
+  if (!player) notFound()
+  const [statistics, capabilities, news] = await Promise.all([
     optional(api.getPlayerStatistics(playerId)),
     optional(api.getCapabilities()),
+    optional(api.getPlayerNews(playerId)),
   ])
   const profileUnsupported = capabilities?.player_profiles === false
 
   return (
     <main className="relative min-h-screen text-white">
       <AnimatedBackground />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdScript(playerJsonLd(player)) }} />
+      <TrackView entity="player" id={playerId} />
       <div className="mx-auto max-w-3xl px-4 pb-16 pt-6">
-        <Link href="/" className="text-xs text-white/50 hover:text-white/80">
-          ← Back to livescores
-        </Link>
+        <div className="flex items-center justify-between">
+          <Link href="/" className="text-xs text-white/50 hover:text-white/80">
+            ← Back to livescores
+          </Link>
+          <ShareButton url={absoluteUrl(`/player/${playerId}`)} title={player.name} />
+        </div>
 
         <header className={`${CARD} mt-4 flex items-center gap-4 px-5 py-6`}>
           <div
@@ -119,6 +143,10 @@ export default async function PlayerPage({ params }: { params: Promise<{ id: str
           )}
         </section>
 
+        <div className="mt-4">
+          <PlayerAnalytics playerId={playerId} showSeasons={false} />
+        </div>
+
         <section className={`${CARD} mt-4`}>
           <h2 className="border-b border-white/[0.06] px-4 py-3 text-sm font-semibold text-white">Recent matches</h2>
           {statistics && statistics.recent_matches.length > 0 ? (
@@ -136,6 +164,15 @@ export default async function PlayerPage({ params }: { params: Promise<{ id: str
             </div>
           )}
         </section>
+
+        {news && news.total > 0 && (
+          <section aria-labelledby="player-news" className="mt-4">
+            <h2 id="player-news" className="mb-3 text-sm font-semibold text-white">
+              News
+            </h2>
+            <EntityNews kind="player" id={playerId} initial={news} />
+          </section>
+        )}
       </div>
     </main>
   )

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.models.match_event import MatchEvent
 from app.services.football_service import FootballService
-from app.services.providers.mock_provider import MockFootballDataProvider
+from tests.fakes.mock_provider import MockFootballDataProvider
 from app.services.providers.schemas import (
     ProviderCompetition,
     ProviderMatch,

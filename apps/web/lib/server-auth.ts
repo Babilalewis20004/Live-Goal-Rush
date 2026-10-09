@@ -1,7 +1,7 @@
 import { cookies } from "next/headers"
 
 import { api, ApiError } from "@/lib/api"
-import type { FavouritesOut, NotificationPreferenceOut, UserOut } from "@/types/api"
+import type { ContentPreferenceOut, FavouritesOut, NotificationPreferenceOut, UserOut } from "@/types/api"
 
 /** Server Components run in this container, not the browser -- there's no
  * cookie jar for `fetch`'s `credentials: "include"` to act on, so the
@@ -40,6 +40,23 @@ export async function getServerNotificationPreferences(): Promise<NotificationPr
     if (error instanceof ApiError && error.status === 401) return []
     throw error
   }
+}
+
+export async function getServerContentPreferences(): Promise<ContentPreferenceOut[]> {
+  const cookieHeader = await buildCookieHeader()
+  if (!cookieHeader) return []
+  try {
+    return await api.getContentPreferences(cookieHeader)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return []
+    throw error
+  }
+}
+
+/** The incoming request's cookies as a `Cookie` header, for Server Components
+ * that call an authenticated endpoint on the visitor's behalf. */
+export async function getServerCookieHeader(): Promise<string | null> {
+  return buildCookieHeader()
 }
 
 async function buildCookieHeader(): Promise<string | null> {

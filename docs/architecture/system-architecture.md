@@ -59,12 +59,12 @@ abstract base class with nine methods (`get_live_matches`, `get_fixtures`,
 `get_standings`, `get_team`, `get_team_fixtures`, `search`). Two concrete
 implementations exist behind it:
 
-- `MockFootballDataProvider` — deterministic, in-memory, no network calls.
-  Used by default (`FOOTBALL_DATA_PROVIDER=mock`).
+- `ApiFootballProvider` — API-Football (api-sports.io v3), the default.
+  Selected with `FOOTBALL_DATA_PROVIDER=api-football`; limited to `FOOTBALL_API_LEAGUE_IDS`.
 - `RealFootballDataProvider` — an `httpx`-based adapter targeting
   football-data.org's v4 API as a concrete example. Inactive by default
   (requires `FOOTBALL_DATA_PROVIDER=real` plus real credentials — see the
-  root README's "Activating a real football data provider" section).
+  root README's "Football data provider" section).
 
 `app/services/providers/__init__.py::get_provider()` is the single factory
 function that decides which one to construct, based on `Settings`. Nothing

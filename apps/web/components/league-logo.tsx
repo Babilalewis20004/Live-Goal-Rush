@@ -1,4 +1,5 @@
 import Image from "next/image"
+import { shouldOptimizeCrest } from "@/lib/images"
 import { colorsFor } from "@/lib/colors"
 
 /** Small shield emblem generated from a competition's name. */
@@ -18,6 +19,7 @@ export function LeagueLogo({
         alt={`${name} emblem`}
         width={size}
         height={size}
+        unoptimized={!shouldOptimizeCrest(logoUrl)}
         className="shrink-0 object-contain"
       />
     )

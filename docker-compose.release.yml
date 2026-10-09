@@ -1,0 +1,14 @@
+# Release overlay: run the exact images CI built for a version instead of building on the host.
+#   API_IMAGE=ghcr.io/org/repo-api:2.1.0 WEB_IMAGE=ghcr.io/org/repo-web:2.1.0 \
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml --env-file .env.production up -d --no-build
+services:
+  api:
+    image: ${API_IMAGE:?set API_IMAGE}
+    pull_policy: always
+  worker:
+    image: ${API_IMAGE:?set API_IMAGE}
+  scheduler:
+    image: ${API_IMAGE:?set API_IMAGE}
+  web:
+    image: ${WEB_IMAGE:?set WEB_IMAGE}
+    pull_policy: always

@@ -73,16 +73,34 @@ class RedisKeys:
         return f"football:match:{match_id}:form"
 
     @staticmethod
-    def match_head_to_head(match_id: int | str) -> str:
-        return f"football:match:{match_id}:h2h"
+    def match_head_to_head(match_id: int | str, window: str = "last5") -> str:
+        base = f"football:match:{match_id}:h2h"
+        return base if window == "last5" else f"{base}:{window}"
 
     @staticmethod
     def team(team_id: int | str) -> str:
         return f"football:team:{team_id}"
 
     @staticmethod
-    def team_form(team_id: int | str, scope: str = "overall") -> str:
-        return f"football:team:{team_id}:form:{scope}"
+    def team_form(team_id: int | str, scope: str = "overall", limit: int = 5) -> str:
+        base = f"football:team:{team_id}:form:{scope}"
+        return base if limit == 5 else f"{base}:{limit}"
+
+    @staticmethod
+    def team_analytics(team_id: int | str, scope: str = "overall", window: int = 10) -> str:
+        return f"football:team:{team_id}:analytics:{scope}:{window}"
+
+    @staticmethod
+    def player_analytics(player_id: int | str, window: int = 10) -> str:
+        return f"football:player:{player_id}:analytics:{window}"
+
+    @staticmethod
+    def match_comparison(match_id: int | str, tier: str) -> str:
+        return f"football:match:{match_id}:comparison:{tier}"
+
+    @staticmethod
+    def match_prediction(match_id: int | str) -> str:
+        return f"football:match:{match_id}:prediction"
 
     @staticmethod
     def team_squad(team_id: int | str) -> str:
@@ -106,6 +124,57 @@ class RedisKeys:
         sync (an empty squad, an unenriched player) enqueue it once per
         window, not once per request."""
         return f"football:sync-requested:{kind}:{identifier}"
+
+    # -- discovery: content, trending, feeds, search -------------------------
+    ARTICLES_VERSION = "football:articles:ver"
+    """Bumped on every content mutation. Public article cache keys embed it, so
+    one INCR invalidates every cached list/detail/related entry at once (the
+    old keys simply age out via their TTL)."""
+
+    @staticmethod
+    def article_cache(version: int | str, name: str) -> str:
+        return f"football:articles:{version}:{name}"
+
+    @staticmethod
+    def trending(entity_type: str, window_hours: int) -> str:
+        return f"football:trending:{entity_type}:{window_hours}h"
+
+    @staticmethod
+    def discovery_home(version: int | str) -> str:
+        return f"football:discovery:home:{version}"
+
+    @staticmethod
+    def user_feed(user_id: int | str) -> str:
+        """Per-user, never shared: the key embeds the user id and is only ever
+        read for the authenticated caller."""
+        return f"football:feed:user:{user_id}"
+
+    @staticmethod
+    def search_suggestions(normalized_query: str) -> str:
+        return f"football:search:suggest:{normalized_query}"
+
+    @staticmethod
+    def search_results(normalized_query: str, limit: int) -> str:
+        return f"football:search:results:{limit}:{normalized_query}"
+
+    @staticmethod
+    def popular_searches(day: str) -> str:
+        return f"football:search:popular:{day}"
+
+    ENGAGEMENT_COUNTS_PREFIX = "football:engagement:counts:"
+    ENGAGEMENT_FLUSH_PREFIX = "football:engagement:flush:"
+
+    @staticmethod
+    def engagement_counts(bucket_epoch: int) -> str:
+        return f"football:engagement:counts:{bucket_epoch}"
+
+    @staticmethod
+    def engagement_seen(signal: str, entity_type: str, entity_id: int | str, viewer: str) -> str:
+        return f"football:engagement:seen:{signal}:{entity_type}:{entity_id}:{viewer}"
+
+    @staticmethod
+    def content_notification_cap(user_id: int | str, day: str) -> str:
+        return f"football:content-notify:cap:{user_id}:{day}"
 
     # -- rate limiting (Phase 3 §21) ---------------------------------------
     @staticmethod

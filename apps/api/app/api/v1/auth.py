@@ -30,6 +30,7 @@ from app.schemas.user import (
     UserRegister,
 )
 from app.services.auth_service import (
+    AccountSuspendedError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidTokenError,
@@ -51,7 +52,7 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
-    secure = settings.environment == "production"
+    secure = settings.is_deployed
     response.set_cookie(
         _ACCESS_COOKIE,
         access_token,
@@ -140,6 +141,8 @@ async def login(
             detail="Too many login attempts for this account. Please try again shortly.",
             headers={"Retry-After": "60"},
         ) from exc
+    except AccountSuspendedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been suspended.") from exc
     except InvalidCredentialsError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"

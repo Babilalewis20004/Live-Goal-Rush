@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native"
 
+import { ContentNotificationSettings } from "@/components/content-notification-settings"
 import { LoadingState } from "@/components/loading-state"
 import { OverrideControl } from "@/components/override-control"
 import { api } from "@/lib/api"
@@ -204,6 +205,8 @@ export default function NotificationSettingsScreen() {
           </Text>
         )}
       </View>
+
+      <ContentNotificationSettings />
     </ScrollView>
   )
 }

@@ -78,6 +78,15 @@ between the two endpoints is a `status` filter applied in Python
 and filtering on every read is cheaper than maintaining two overlapping
 cache entries that would need to be invalidated together anyway.
 
+## Discovery keys
+
+News lists/details/related and the discovery home are keyed by a **version**
+(`football:articles:ver`) that every content change increments, so one `INCR`
+invalidates all of them at once; trending lists are rewritten by a beat task;
+the personalised feed is per user (`football:feed:user:{id}`, 45 s). Search
+suggestions, popular searches and the hourly view counters also live here. The full
+table with TTLs is in [discovery.md](discovery.md) §6.
+
 ## TTL strategy
 
 Two tiers, both configurable via env vars (`.env.example`), not hard-coded
@@ -153,3 +162,20 @@ cache-aside like everything else, straight against the provider on a
 miss, under `football:competitions` with the default TTL. This is the one
 read path that can still reach the provider directly — everywhere else,
 reads only ever reach Postgres (see `realtime.md`).
+
+## Phase 6 keys
+
+| Key | TTL | Invalidated by |
+|---|---|---|
+| `football:team:{id}:analytics:{scope}:{window}` | `ANALYTICS_CACHE_TTL_SECONDS` 900 | match finished (explicit delete) |
+| `football:player:{id}:analytics:{window}` | 900 | TTL |
+| `football:match:{id}:comparison:{basic or full}` | 900 | TTL |
+| `football:match:{id}:prediction` | `PREDICTION_CACHE_TTL_SECONDS` 300 | deleted when a prediction is (re)generated |
+| `football:team:{id}:form:{scope}:10` | default TTL | match finished |
+| `football:match:{id}:h2h` (+ `:last10`, `:all`) | static TTL | TTL (the pre-kickoff window is fixed) |
+| comments page (versioned per target), reaction / poll hashes | 30 s / 10 min | version bump / rebuilt from Postgres |
+| `football:rt:throttle:{type}:{match}` | 2 s | expiry (limits real-time nudges) |
+
+Rules: caches hold viewer-independent data; per-plan and per-viewer shaping happens **after** the cache; entitlements
+are never cached, so a cancelled subscription cannot linger in Redis. Hit rate in a local Docker run of the benchmark
+(`apps/api/scripts/benchmark.py`): 99.5 %.

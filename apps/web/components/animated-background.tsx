@@ -11,8 +11,10 @@ export function AnimatedBackground() {
 
       {/* moving pitch lines */}
       <div
-        className="ls-pitch-lines absolute inset-0 opacity-[0.05]"
+        className="ls-pitch-lines absolute left-0 right-0 top-0 opacity-[0.05]"
         style={{
+          // one pattern period (160px) taller than the viewport so the translate-by-one-period loop never shows an edge
+          height: "calc(100% + 160px)",
           backgroundImage:
             "repeating-linear-gradient(to bottom, transparent 0 78px, rgba(255,255,255,0.9) 78px 80px)",
           backgroundSize: "100% 160px",

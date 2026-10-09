@@ -14,6 +14,8 @@ import {
 } from "@/components/match-centre/rows"
 import { SeasonChips } from "@/components/match-centre/season-chips"
 import { FeatureState, TabBar, type TabDef } from "@/components/match-centre/ui"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
 import { TeamBadge } from "@/components/team-badge"
 import { useAuth } from "@/hooks/use-auth"
 import { useSeasonView } from "@/hooks/use-season-view"
@@ -21,15 +23,17 @@ import { api, ApiError } from "@/lib/api"
 import { groupStandings } from "@/lib/match-centre"
 import { theme } from "@/theme"
 import type {
+  ArticleSummary,
   Capabilities,
   CompetitionOut,
   CompetitionSeasonsOut,
   MatchSummary,
+  Page,
   StandingEntry,
   TopScorersOut,
 } from "@/types/api"
 
-type TabId = "standings" | "fixtures" | "results" | "scorers"
+type TabId = "standings" | "fixtures" | "results" | "scorers" | "news"
 
 const TABS: TabDef<TabId>[] = [
   { id: "standings", label: "Standings" },
@@ -39,6 +43,7 @@ const TABS: TabDef<TabId>[] = [
 ]
 
 interface Loaded {
+  news: Page<ArticleSummary> | null
   competition: CompetitionOut
   standings: StandingEntry[] | null
   fixtures: MatchSummary[]
@@ -74,7 +79,7 @@ export default function CompetitionScreen() {
     setError(null)
     try {
       const competitionId = Number(id)
-      const [competition, fixtures, results, standings, topScorers, capabilities, seasons, favourites] = await Promise.all([
+      const [competition, fixtures, results, standings, topScorers, capabilities, seasons, favourites, news] = await Promise.all([
         api.getCompetition(competitionId),
         api.getCompetitionFixtures(competitionId, 1, 50, "upcoming"),
         api.getCompetitionFixtures(competitionId, 1, 50, "results"),
@@ -83,6 +88,7 @@ export default function CompetitionScreen() {
         optional(api.getCapabilities()),
         optional(api.getCompetitionSeasons(competitionId)),
         user ? api.getFavourites().catch(() => null) : Promise.resolve(null),
+        optional(api.getCompetitionNews(competitionId)),
       ])
       setLoaded({
         competition,
@@ -92,6 +98,7 @@ export default function CompetitionScreen() {
         topScorers,
         capabilities,
         seasons,
+        news,
       })
       setInitialFollowed(favourites?.competitions.some((f) => f.competition.id === competitionId) ?? false)
     } catch (e) {
@@ -140,6 +147,8 @@ export default function CompetitionScreen() {
           node: <FeatureState feature="standings" capabilities={capabilities} pendingMessage="No table is available yet." />,
         })
       }
+    } else if (tab === "news" && loaded.news) {
+      out.push({ key: "news", node: <EntityNews kind="competition" id={loaded.competition.id} initial={loaded.news} /> })
     } else if (tab === "fixtures" || tab === "results") {
       const list = tab === "fixtures" ? fixtures : results
       if (list.length === 0) {
@@ -189,6 +198,7 @@ export default function CompetitionScreen() {
   }
 
   const { competition } = loaded
+  const tabs: TabDef<TabId>[] = loaded.news && loaded.news.total > 0 ? [...TABS, { id: "news", label: "News" }] : TABS
   const header = (
     <View style={{ gap: 12, marginBottom: 12 }}>
       <View style={styles.headerCard}>
@@ -203,7 +213,8 @@ export default function CompetitionScreen() {
         </View>
         <FavouriteButton kind="competition" id={competition.id} initialFollowed={initialFollowed} />
       </View>
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <ShareButton kind="competition" id={competition.id} title={competition.name} />
+      <TabBar tabs={tabs} active={tab} onChange={setTab} />
     </View>
   )
 

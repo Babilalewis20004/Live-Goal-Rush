@@ -159,7 +159,7 @@ class RealFootballDataProvider(FootballDataProvider):
             raise RuntimeError(
                 "RealFootballDataProvider requires FOOTBALL_API_BASE_URL and "
                 "FOOTBALL_API_KEY to be set. Falling back is not automatic -- "
-                "set FOOTBALL_DATA_PROVIDER=mock to use the mock provider instead."
+                "set FOOTBALL_DATA_PROVIDER=api-football to use API-Football instead."
             )
         self._client = httpx.AsyncClient(
             base_url=base_url,

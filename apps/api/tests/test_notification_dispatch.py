@@ -18,7 +18,7 @@ from app.models.notification import NotificationLog, NotificationPreference
 from app.models.user import User
 from app.services.football_service import FootballService
 from app.services.notification_dispatch_service import resolve_targets
-from app.services.providers.mock_provider import MockFootballDataProvider
+from tests.fakes.mock_provider import MockFootballDataProvider
 from app.services.providers.schemas import ProviderCompetition, ProviderMatch, ProviderTeam
 
 _COMPETITION = ProviderCompetition(provider_id="comp-x", name="Test League", country="Testland", type="league")

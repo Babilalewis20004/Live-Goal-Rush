@@ -47,6 +47,15 @@ class NotificationTarget:
     dedup_key: str
 
 
+_IN_CHUNK = 5000
+_CLAIM_CHUNK = 2000
+
+
+def _chunks(items: list, size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
 def _dedup_key(event: RealtimeEvent) -> str:
     """Event-scoped types (GOAL/CARD) key off the underlying `MatchEvent`
     id already present in `data["event"]["id"]` (see
@@ -109,15 +118,15 @@ async def resolve_targets(db: AsyncSession, event: RealtimeEvent) -> list[Notifi
         return []
 
     candidate_ids = list(qualifying_by_user.keys())
-    pref_rows = await db.execute(
-        select(NotificationPreference).where(
-            NotificationPreference.user_id.in_(candidate_ids),
-            NotificationPreference.event_type == event.type,
+    prefs: dict[tuple[int, NotificationScope, int | None], bool] = {}
+    for chunk in _chunks(candidate_ids, _IN_CHUNK):
+        pref_rows = await db.execute(
+            select(NotificationPreference).where(
+                NotificationPreference.user_id.in_(chunk),
+                NotificationPreference.event_type == event.type,
+            )
         )
-    )
-    prefs: dict[tuple[int, NotificationScope, int | None], bool] = {
-        (p.user_id, p.scope_type, p.scope_id): p.enabled for p in pref_rows.scalars()
-    }
+        prefs.update({(p.user_id, p.scope_type, p.scope_id): p.enabled for p in pref_rows.scalars()})
 
     default_on = event.type in DEFAULT_ON_EVENT_TYPES
     notify_user_ids: list[int] = []
@@ -136,20 +145,25 @@ async def resolve_targets(db: AsyncSession, event: RealtimeEvent) -> list[Notifi
         return []
 
     dedup_key = _dedup_key(event)
-    claim_stmt = (
-        pg_insert(NotificationLog)
-        .values(
-            [
-                {"user_id": uid, "match_id": match_id, "event_type": event.type.value, "dedup_key": dedup_key}
-                for uid in notify_user_ids
-            ]
+    # One multi-row INSERT per chunk. A single statement carries 4 bind parameters per recipient and the driver
+    # allows 32,767, so a team with more than ~8,000 followers made the whole dispatch fail -- precisely the
+    # matches with the most fans. Each chunk is its own atomic claim; a retry after a partial failure re-claims
+    # nothing already claimed (ON CONFLICT DO NOTHING), so no one is notified twice.
+    claimed_ids: set[int] = set()
+    for chunk in _chunks(notify_user_ids, _CLAIM_CHUNK):
+        claim_stmt = (
+            pg_insert(NotificationLog)
+            .values(
+                [
+                    {"user_id": uid, "match_id": match_id, "event_type": event.type.value, "dedup_key": dedup_key}
+                    for uid in chunk
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=["user_id", "dedup_key"])
+            .returning(NotificationLog.user_id)
         )
-        .on_conflict_do_nothing(index_elements=["user_id", "dedup_key"])
-        .returning(NotificationLog.user_id)
-    )
-    result = await db.execute(claim_stmt)
-    claimed_ids = {row[0] for row in result}
-    await db.commit()
+        claimed_ids.update(row[0] for row in await db.execute(claim_stmt))
+        await db.commit()
 
     deduplicated = len(notify_user_ids) - len(claimed_ids)
     if deduplicated:

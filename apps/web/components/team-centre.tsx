@@ -2,21 +2,29 @@
 
 import { useState } from "react"
 import Link from "next/link"
+import { TeamAnalytics } from "@/components/analytics/team-analytics"
 import { FeatureState } from "@/components/ui/feature-state"
 import { EmptyState } from "@/components/ui/empty-state"
 import { TabPanel, Tabs, type TabDef } from "@/components/ui/tabs"
 import { FormStrip } from "@/components/match-centre/form-strip"
+import { InsightsList } from "@/components/insights/insights-list"
 import { MatchCard } from "@/components/match-card"
+import { TeamInjuries } from "@/components/team-injuries"
+import { EntityNews } from "@/components/news/entity-news"
 import type {
+  ArticleSummary,
   Capabilities,
   MatchSummary,
+  Page,
   PlayerOut,
+  TeamInjuriesOut,
+  TeamInsightsOut,
   TeamDetail,
   TeamFormOut,
   TeamStatisticsOut,
 } from "@/types/api"
 
-type TabId = "overview" | "fixtures" | "results" | "squad" | "stats"
+type TabId = "overview" | "fixtures" | "results" | "squad" | "stats" | "analytics" | "news"
 
 const TABS: TabDef<TabId>[] = [
   { id: "overview", label: "Overview" },
@@ -24,6 +32,7 @@ const TABS: TabDef<TabId>[] = [
   { id: "results", label: "Results" },
   { id: "squad", label: "Squad" },
   { id: "stats", label: "Statistics" },
+  { id: "analytics", label: "Analytics" },
 ]
 
 const ID_PREFIX = "team"
@@ -48,6 +57,12 @@ export interface TeamCentreData {
   squad: PlayerOut[] | null
   statistics: TeamStatisticsOut | null
   capabilities: Capabilities | null
+  /** First page of news linked to this team; the tab only exists when there is some. */
+  news: Page<ArticleSummary> | null
+  /** Form summary, streaks and scoring in sentences (null if unavailable). */
+  insights: TeamInsightsOut | null
+  /** Current absences; null if the request failed. */
+  injuries: TeamInjuriesOut | null
 }
 
 /** Team page body. Data is loaded server-side (app/team/[id]/page.tsx); the
@@ -55,11 +70,12 @@ export interface TeamCentreData {
  * centre, which owns the real-time feed. */
 export function TeamCentre({ data }: { data: TeamCentreData }) {
   const [tab, setTab] = useState<TabId>("overview")
-  const { team, fixtures, results, form, squad, statistics, capabilities } = data
+  const { team, fixtures, results, form, squad, statistics, capabilities, news, insights, injuries } = data
+  const tabs: TabDef<TabId>[] = news && news.total > 0 ? [...TABS, { id: "news", label: "News" }] : TABS
 
   return (
     <div>
-      <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Team sections" />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Team sections" />
 
       <TabPanel idPrefix={ID_PREFIX} id="overview" active={tab === "overview"}>
         <div className="space-y-4">
@@ -72,6 +88,14 @@ export function TeamCentre({ data }: { data: TeamCentreData }) {
             </div>
             <p className="mt-3 text-[10px] text-white/30">Historical results, not a prediction.</p>
           </section>
+          {insights && insights.insights.length > 0 && (
+            <section className={`${CARD} p-4`}>
+              <h2 className="mb-3 text-sm font-semibold text-white">Form &amp; streaks</h2>
+              <InsightsList title={`Last ${insights.sample_size} results`} insights={insights.insights} />
+              <p className="mt-3 text-[10px] text-white/30">Historical results only. Not a prediction.</p>
+            </section>
+          )}
+          <TeamInjuries injuries={injuries} />
           {team.venue && (
             <section className={`${CARD} px-4 py-3 text-sm text-white/70`}>
               <span className="text-white/40">Stadium </span>
@@ -136,6 +160,10 @@ export function TeamCentre({ data }: { data: TeamCentreData }) {
         )}
       </TabPanel>
 
+      <TabPanel idPrefix={ID_PREFIX} id="analytics" active={tab === "analytics"}>
+        <TeamAnalytics teamId={team.id} />
+      </TabPanel>
+
       <TabPanel idPrefix={ID_PREFIX} id="stats" active={tab === "stats"}>
         {statistics && statistics.seasons.length > 0 ? (
           <div className="space-y-4">
@@ -179,6 +207,12 @@ export function TeamCentre({ data }: { data: TeamCentreData }) {
           <EmptyState message="No season statistics are available for this team yet." />
         )}
       </TabPanel>
+
+      {news && news.total > 0 && (
+        <TabPanel idPrefix={ID_PREFIX} id="news" active={tab === "news"}>
+          <EntityNews kind="team" id={team.id} initial={news} />
+        </TabPanel>
+      )}
     </div>
   )
 }

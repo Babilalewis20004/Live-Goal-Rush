@@ -4,10 +4,13 @@ import './globals.css'
 import { AuthProvider } from '@/lib/auth-context'
 import { NavBar } from '@/components/nav-bar'
 import { ServiceWorkerRegister } from '@/components/service-worker-register'
+import { SITE_NAME, SITE_URL } from '@/lib/seo'
 import { getServerUser } from '@/lib/server-auth'
 
 export const metadata: Metadata = {
-  title: 'LivePitch · Live Football Scores',
+  metadataBase: new URL(SITE_URL),
+  title: { default: 'LivePitch · Live Football Scores', template: `%s · ${SITE_NAME}` },
+  openGraph: { siteName: SITE_NAME, type: 'website', locale: 'en_GB' },
   description: 'Real-time livescores for major football leagues — Champions League, Premier League, LaLiga, Serie A, Bundesliga and Ligue 1.',
   generator: 'v0.app',
   manifest: '/manifest.json',
@@ -50,7 +53,8 @@ export default async function RootLayout({
           <NavBar />
           {children}
         </AuthProvider>
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        {/* Vercel Analytics serves its script from /_vercel/insights, which exists only on Vercel: elsewhere it is a 404 on every page */}
+        {process.env.NODE_ENV === 'production' && process.env.VERCEL && <Analytics />}
       </body>
     </html>
   )

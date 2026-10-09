@@ -6,21 +6,24 @@ import { EmptyState } from "@/components/ui/empty-state"
 import { FeatureState } from "@/components/ui/feature-state"
 import { TabPanel, Tabs, type TabDef } from "@/components/ui/tabs"
 import { MatchCard } from "@/components/match-card"
+import { EntityNews } from "@/components/news/entity-news"
 import { TeamBadge } from "@/components/team-badge"
 import { StandingsTable } from "@/components/match-centre/standings-table"
 import { SeasonSelect } from "@/components/match-centre/season-select"
 import { TopScorers } from "@/components/match-centre/top-scorers"
 import { useSeasonView } from "@/hooks/use-season-view"
 import type {
+  ArticleSummary,
   Capabilities,
   CompetitionSeasonsOut,
   MatchSummary,
+  Page,
   StandingEntry,
   TeamOut,
   TopScorersOut,
 } from "@/types/api"
 
-type TabId = "standings" | "fixtures" | "results" | "scorers" | "teams"
+type TabId = "standings" | "fixtures" | "results" | "scorers" | "teams" | "news"
 
 const TABS: TabDef<TabId>[] = [
   { id: "standings", label: "Standings" },
@@ -41,6 +44,8 @@ export interface CompetitionCentreData {
   results: MatchSummary[]
   topScorers: TopScorersOut | null
   capabilities: Capabilities | null
+  /** First page of news for this competition; the tab only exists when there is some. */
+  news: Page<ArticleSummary> | null
 }
 
 function MatchList({ matches, empty }: { matches: MatchSummary[]; empty: string }) {
@@ -56,7 +61,8 @@ function MatchList({ matches, empty }: { matches: MatchSummary[]; empty: string 
 
 export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
   const [tab, setTab] = useState<TabId>("standings")
-  const { competitionId, seasons, fixtures, results, capabilities } = data
+  const { competitionId, seasons, fixtures, results, capabilities, news } = data
+  const tabs: TabDef<TabId>[] = news && news.total > 0 ? [...TABS, { id: "news", label: "News" }] : TABS
   const view = useSeasonView(
     competitionId,
     { standings: data.standings, topScorers: data.topScorers },
@@ -77,7 +83,7 @@ export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
 
   return (
     <div>
-      <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Competition sections" />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Competition sections" />
 
       <TabPanel idPrefix={ID_PREFIX} id="standings" active={tab === "standings"}>
         <SeasonSelect info={seasons} value={view.season} onChange={view.select} />
@@ -138,6 +144,12 @@ export function CompetitionCentre({ data }: { data: CompetitionCentreData }) {
           <EmptyState message="No teams to show yet." />
         )}
       </TabPanel>
+
+      {news && news.total > 0 && (
+        <TabPanel idPrefix={ID_PREFIX} id="news" active={tab === "news"}>
+          <EntityNews kind="competition" id={competitionId} initial={news} />
+        </TabPanel>
+      )}
     </div>
   )
 }

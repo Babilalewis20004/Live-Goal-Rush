@@ -97,10 +97,81 @@ cross-process Prometheus metrics (API + worker + scheduler in one `/metrics`), a
 React Native test harness (`npm test` in `apps/mobile`), and plan-gated paid
 provider features (`FOOTBALL_API_FEATURES`). Details: `docs/architecture/phase5.md`
 
+**Discovery (the second "Phase 5")** — football news, one search across everything,
+trending and a personalised feed, on PostgreSQL + Redis + the existing Celery worker (no
+new infrastructure). *(The repository already used the name "Phase 5" for the work
+above, so the code, migration and docs call this one "discovery".)*
+
+- **News**: articles linked to the existing teams, players, competitions and matches
+  (never copies), with categories (one per competition, plus generic ones), reusable
+  tags, a draft → published → archived workflow, a role-gated editor (`editor`/`admin`
+  roles granted with `python -m app.cli set-role`), an allow-list **HTML sanitizer**,
+  related articles with explained deterministic scoring, and News tabs on team,
+  competition, player and match pages (match news: match → team → competition)
+- **Unified search**: teams, players, competitions, matches and articles in one
+  grouped, relevance-ranked result (exact > prefix > contains > fuzzy) using `pg_trgm`
+  indexes; suggestions, popular searches (only phrases several visitors chose a result
+  for), recent searches (server-side for signed-in users, on-device otherwise), length
+  limits and per-client rate limiting
+- **Trending**: transparent, decayed, windowed scores from views (counted in Redis,
+  de-duplicated, aggregated into Postgres by a beat task), chosen search results, live
+  matches, follows and news — each entry says which signals applied, and entities with
+  no signal are not ranked
+- **Personalised feed** (`/feed`): fixed, explained tiers — live followed → followed
+  team today → followed competition today → upcoming → results → news → searched →
+  trending — with an `explanation` on every item; anonymous visitors keep the full public
+  experience
+- **SEO and sharing**: per-page metadata, one canonical URL per page, Open Graph/Twitter
+  cards, schema.org `NewsArticle`/`SportsTeam`/`SportsOrganization`/`Person`/`SportsEvent`,
+  `robots.txt`, `sitemap.xml`, native share sheets, `/article/{slug}` deep links
+- **Opt-in article notifications** (all off by default, relevance-gated, 3/day cap,
+  idempotent) through the existing push pipeline
+- Full details: [discovery.md](docs/architecture/discovery.md)
+
+**Phase 6** — media, editorial workflow, community, analytics, predictions and Premium, on
+the same PostgreSQL + Redis + Celery + WebSocket stack (the only additions to Docker Compose are
+object storage, Prometheus and Grafana). Delivered in two passes; start at
+[docs/architecture/phase6.md](docs/architecture/phase6.md).
+
+*6a — platform and creator tools*
+
+- **Media**: image upload to S3/R2/MinIO (or a local directory), validated by content, re-encoded
+  to WebP in four sizes, EXIF stripped, served with immutable caching and no filesystem paths
+  ([media.md](docs/architecture/media.md))
+- **Editorial workflow**: author → review → editor approval → publish, **scheduled publishing**
+  (idempotent beat job), full **revision history** with compare and restore, and a mobile
+  editor ([editorial-workflow.md](docs/architecture/editorial-workflow.md))
+- **Community**: comments and replies (plain text, rate-limited, spam-guarded, reportable,
+  moderated), seven **reactions**, editor-created **polls**, opt-in public **profiles** with badges
+  ([community.md](docs/architecture/community.md))
+- **Observability**: structured JSON logs with request ids, Prometheus metrics, five provisioned
+  Grafana dashboards and starter alerts ([observability.md](docs/architecture/observability.md))
+
+*6b — analytics, predictions, Premium*
+
+- **Advanced analytics**: team attack / possession / defence / discipline, player per-90 and
+  match-by-match history, form with streaks, head-to-head windows, and a match comparison — every
+  figure is provider-capability aware (missing is `—`, never 0)
+  ([analytics.md](docs/architecture/analytics.md))
+- **Predictions**: a deterministic Poisson model (`poisson-v1`), stored with model version and data
+  timestamp, locked at kickoff, **evaluated** against results (Brier score, calibration) —
+  labelled "Model estimate", never advice, and no accuracy is claimed without measured evidence
+  ([predictions.md](docs/architecture/predictions.md))
+- **Insights**: sourced sentences about form, streaks, head-to-head, live match statistics and
+  players, persisted with the data version they came from; personalised "for you" lines about
+  followed teams and competitions; community interactions can lift items in the feed
+- **Monetisation**: provider-independent subscriptions and entitlements, signed + idempotent
+  payment webhooks, cancel/renew/payment-failure handling, an ad-eligibility abstraction. Premium
+  is enforced **on the server**; livescores, the match centre, news, search and community stay
+  free ([monetisation.md](docs/architecture/monetisation.md))
+- **Moderation additions**: profile reports and admin account suspension
+- Web and mobile UIs for all of it (an *Analysis* tab on matches, *Analytics* on teams, player
+  performance, a Premium page, accessible text alternatives for every chart)
+
 ## Architecture
 
 ```
-Football Data Provider (mock, time-evolving — or a real API like football-data.org)
+Football Data Provider (API-Football, or football-data.org)
         │
         ▼
 Celery worker  ◄── Celery beat (scheduler)
@@ -126,6 +197,7 @@ Full write-ups:
 [caching.md](docs/architecture/caching.md) ·
 [auth.md](docs/architecture/auth.md) ·
 [notifications.md](docs/architecture/notifications.md) ·
+[discovery.md](docs/architecture/discovery.md) ·
 [background-workers.md](docs/development/background-workers.md) ·
 [websockets.md](docs/development/websockets.md) ·
 [docker.md](docs/deployment/docker.md)
@@ -166,9 +238,13 @@ cp .env.example .env   # override POSTGRES_PORT/REDIS_PORT if already taken
 docker compose up --build
 ```
 
-Starts `postgres`, `redis`, `api` (runs migrations, then serves), `worker`,
-`scheduler`, and `web`. API: http://localhost:8000 (`/docs`, `/health`,
-`/metrics`). Web: http://localhost:3000. Full details, including why
+Starts `postgres`, `redis`, `minio` (S3-compatible object storage), `redis-exporter`,
+`api` (runs migrations, then serves), `worker`, `scheduler`, `web`, `prometheus` and `grafana`.
+API: http://localhost:8000 (`/docs`, `/health`, `/metrics`). Web: http://localhost:3000.
+Prometheus: http://localhost:9090. Grafana: http://localhost:3001 (`admin`/`admin` — change it).
+MinIO console: http://localhost:9001. MinIO no longer publishes its community image on Docker Hub,
+so Compose uses the Chainguard build (`cgr.dev/chainguard/minio:latest`); swap in any S3-compatible
+store via `S3_*` if you prefer. Full details, including why
 `worker`/`scheduler` wait on `api`'s healthcheck specifically:
 [docs/deployment/docker.md](docs/deployment/docker.md).
 
@@ -247,45 +323,56 @@ commit a real `.env` file or real credentials.
 | -------------------------------- | -------------- | ----------------------------------------------------- |
 | `DATABASE_URL`                   | api, worker, scheduler | Postgres connection string (asyncpg driver) |
 | `REDIS_URL`                      | api, worker, scheduler | Redis connection string (cache + Pub/Sub) |
-| `FOOTBALL_DATA_PROVIDER`         | api, worker, scheduler | `mock` (default) or `real`                  |
+| `FOOTBALL_DATA_PROVIDER`         | api, worker, scheduler | `api-football` (default) or `real`          |
 | `FOOTBALL_API_BASE_URL` / `FOOTBALL_API_KEY` | api, worker, scheduler | Real provider config (only if `FOOTBALL_DATA_PROVIDER=real`) |
 | `CORS_ORIGINS`                   | api            | Comma-separated allow-list — also gates WebSocket origins |
 | `LIVE_POLL_INTERVAL_SECONDS` / `UPCOMING_POLL_INTERVAL_SECONDS` / `POST_MATCH_SYNC_INTERVAL_SECONDS` | worker, scheduler | Adaptive polling intervals |
 | `REDIS_LIVE_MATCH_TTL_SECONDS` / `REDIS_DEFAULT_TTL_SECONDS` | api | Cache TTLs |
 | `WEBSOCKET_HEARTBEAT_SECONDS` / `WEBSOCKET_MAX_CONNECTIONS` | api | WebSocket heartbeat + connection cap |
 | `SYNC_MAX_RETRIES` / `SYNC_BACKOFF_SECONDS` | worker | Provider retry/backoff |
-| `MOCK_LIVE_SECONDS_PER_MINUTE`   | api, worker    | Mock provider's simulated live-match speed |
+| `FOOTBALL_API_LEAGUE_IDS`        | api, worker    | API-Football league ids to expose (default `39,140,135` = Premier League, La Liga, Serie A) |
 | `JWT_SECRET` / `JWT_ALGORITHM` | api | Access token signing — **override `JWT_SECRET` outside local dev** |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` / `PASSWORD_RESET_TOKEN_EXPIRE_MINUTES` | api | Token lifetimes |
 | `RATE_LIMIT_REGISTER_PER_HOUR` / `RATE_LIMIT_LOGIN_PER_MINUTE` / `RATE_LIMIT_PASSWORD_RESET_PER_HOUR` | api | Redis-backed auth rate limits |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | api, worker | Web Push — blank skips web push registration (not an error) |
-| `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` | web | REST / WebSocket base URLs |
+| `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` | web | REST / WebSocket base URLs (server-side) |
+| `NEXT_PUBLIC_BROWSER_API_URL` | web | Where the **browser** reaches the API for client-side calls (Docker: `http://localhost:8000`; build-time) |
+| `NEXT_PUBLIC_SITE_URL` | web | Canonical public origin for SEO (canonical links, Open Graph, sitemap; build-time) |
+| `EXPO_PUBLIC_SITE_URL` | mobile | Public web origin used for share links |
+| `TRUSTED_PROXY_CIDRS` | api | Proxies whose `X-Forwarded-For` is believed (per-visitor rate limits); empty = never |
+| `ARTICLE_IMAGE_ALLOWED_HOSTS` | api | Hostnames article images may come from (empty = any http/https) |
+| `TRENDING_WINDOW_HOURS` / `TRENDING_HALF_LIFE_HOURS` / `CONTENT_NOTIFICATION_DAILY_CAP` / `SEARCH_RATE_LIMIT_PER_MINUTE` / `POPULAR_SEARCH_MIN_VIEWERS` | api | Discovery tuning, documented in `apps/api/.env.example` |
 | `EXPO_PUBLIC_API_URL` / `EXPO_PUBLIC_WS_URL` | mobile | REST / WebSocket base URLs |
+| `MEDIA_STORAGE_BACKEND` / `S3_ENDPOINT_URL` / `S3_BUCKET` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `MEDIA_PUBLIC_BASE_URL` / `PUBLIC_API_URL` | api, worker | Media storage (`s3` \| `local`) and the URL clients use to reach images |
+| `LOG_FORMAT` / `LOG_LEVEL` / `SERVICE_NAME` | api, worker, scheduler | Structured logging |
+| `ANALYTICS_CACHE_TTL_SECONDS` / `PREDICTION_CACHE_TTL_SECONDS` / `PREDICTION_HORIZON_HOURS` / `ANALYTICS_PER_MINUTE` | api, worker | Analytics + prediction tuning |
+| `BILLING_PROVIDER` / `BILLING_WEBHOOK_SECRET` / `STRIPE_SECRET_KEY` / `BILLING_SUCCESS_URL` / `BILLING_CANCEL_URL` / `BILLING_GRACE_DAYS` | api | Billing. `test` provider is refused when `ENVIRONMENT=production`; set a long random `BILLING_WEBHOOK_SECRET` |
+| `ADS_ENABLED` | api | Reserve labelled ad slots (no ad network or tracking is built in) |
+| `PROMETHEUS_PORT` / `GRAFANA_PORT` / `GRAFANA_ADMIN_PASSWORD` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` | compose | Monitoring and storage ports |
 
 Full documentation (defaults, TTL strategy, polling rationale) in
 `apps/api/.env.example`, `docs/architecture/caching.md`,
 `docs/architecture/realtime.md`, `docs/architecture/auth.md`, and
 `docs/architecture/notifications.md`.
 
-## Activating a real football data provider
+## Football data provider
 
-Ships with `MockFootballDataProvider` (deterministic, no external calls,
-now with time-evolving live matches — see `docs/architecture/realtime.md`)
-because no real API credentials are available in this environment.
-`RealFootballDataProvider` (`apps/api/app/services/providers/real_provider.py`)
-targets football-data.org's free-tier v4 API as a concrete example, behind
-the exact same `FootballDataProvider` interface. To activate it:
+The app uses **API-Football** (api-sports.io v3) by default, via
+`apps/api/app/services/providers/api_football_provider.py`. Set in `.env`:
 
-1. Get a free key at https://www.football-data.org/client/register
-2. Set `FOOTBALL_DATA_PROVIDER=real`, `FOOTBALL_API_BASE_URL=https://api.football-data.org/v4`,
-   and `FOOTBALL_API_KEY=<your key>`
-3. Restart the API/worker/scheduler — no other code changes required
+```
+FOOTBALL_DATA_PROVIDER=api-football
+FOOTBALL_API_KEY=<your api-sports key>
+FOOTBALL_API_LEAGUE_IDS=39,140,135   # Premier League, La Liga, Serie A
+```
 
-The free tier's coverage/rate limits are narrower than the mock dataset and
-it has no event timeline or unified search endpoint; see the comments in
-`real_provider.py`, and lower `LIVE_POLL_INTERVAL_SECONDS` accordingly (see
-`docs/architecture/realtime.md`'s provider rate-limit section) — its default
-assumes the generous mock provider, not a rate-limited free tier.
+There is no bundled mock data: the database is filled from the provider on startup
+and by the background sync. The deterministic fake provider used by the test suite
+lives in `apps/api/tests/fakes/` and is not importable from the app.
+
+A football-data.org adapter (`FOOTBALL_DATA_PROVIDER=real`, `real_provider.py`) is
+also included. Mind your plan's daily request quota when tuning
+`LIVE_POLL_INTERVAL_SECONDS`.
 
 ## Database
 
@@ -316,7 +403,7 @@ Details: [docs/architecture/api-architecture.md](docs/architecture/api-architect
 
 ## Testing
 
-- Backend: `cd apps/api && pytest` — covers the mock provider (including
+- Backend: `cd apps/api && pytest` — covers the test fake provider (including
   its time-evolving live-match simulation), the service layer's cache-aside
   reads, all REST endpoints, pagination/error/validation handling, the
   Redis service and cache-aside layer, change detection, event
@@ -327,10 +414,19 @@ Details: [docs/architecture/api-architecture.md](docs/architecture/api-architect
   `npm test` (Vitest) covers the WebSocket client's reconnect/backoff/
   heartbeat behavior and the real-time hooks' pure update logic (applying
   an incoming message, deriving live/today/upcoming/finished views).
-- Mobile: `cd apps/mobile && npx tsc --noEmit && npx expo lint` — mirrors
-  web's hooks/client by construction (same contract, parallel
-  implementation); no separate React Native test harness was added in
-  Phase 2 or Phase 3 (see Known limitations).
+- Mobile: `cd apps/mobile && npx tsc --noEmit && npx expo lint && npm test` — `jest-expo` +
+  React Native Testing Library (component, hook and screen tests, including the unified
+  search screen, news components and deep-link allow-list). The jest suite can time out
+  individual tests (5 s) on a heavily loaded machine; they pass when run alone.
+- **Phase 6 results (final run):** backend **631** tests (full run: 629 passed, then the 2 that failed were fixed and re-run green;
+  Phase 5 baseline was 377), web **140** (baseline 100), mobile **157** (baseline 86); `tsc`, lint and the production web
+  build are clean. The backend suite now builds the schema once per session and empties tables between tests
+  (about 20 minutes instead of 50+ on a Docker/Windows machine). Benchmarks: `apps/api/scripts/benchmark.py`,
+  `apps/api/scripts/ws_fanout.py`.
+- Discovery adds `test_html_sanitizer`, `test_news_content`, `test_discovery_search`,
+  `test_discovery_engagement`, `test_discovery_feed`, `test_content_notifications`,
+  `test_client_ip` and the end-to-end `test_discovery_e2e` to the backend suite (the full
+  backend suite takes ~12 minutes: every test rebuilds the schema).
 
 ## Roadmap (Phase 4+)
 
@@ -343,13 +439,39 @@ not to need a rewrite for these:
 - Real transactional email delivery (password reset currently logs the
   link server-side and returns it in dev-only responses — see
   `docs/architecture/auth.md`)
-- Betting odds, advertisements, subscriptions/payments
-- Social features, AI features, chat
+- Betting odds (never planned — predictions are statistical estimates only), chat
 - A real automated type-sharing pipeline between the FastAPI schemas and
   the TypeScript clients (e.g. `openapi-typescript`), replacing the
   hand-synced `packages/shared/types.ts`
 
 ## Known limitations
+
+- **Discovery**: editing is raw HTML behind a server sanitizer. Trending means *attention*, needs
+  real traffic to say much, and lags by 1–5 minutes (counters are aggregated by a beat task,
+  at-least-once). The sitemap lists main pages, competitions and articles, not every
+  team/player/match. Details: [discovery.md](docs/architecture/discovery.md) §10.
+
+- **Phase 6 predictions** are a simple independent-Poisson model (`poisson-v1`). It ignores
+  injuries, lineups, rest and opposition quality beyond goals, has no measured track record yet
+  (the evaluation endpoint reports its own sample size and a no-skill baseline), and refuses to
+  predict when either team has fewer than 3 stored results. There are no player or team-trajectory
+  predictions. Details: [predictions.md](docs/architecture/predictions.md).
+- **Phase 6 analytics** depend on what the provider supplied: xG exists only where
+  `match_statistics.expected_goals` was populated; expected assists, progressive passes and player
+  xG are not stored. The mock provider populates only some statistics.
+- **Billing**: the Stripe adapter has not been exercised against a live Stripe account (the signing
+  scheme, event mapping and idempotency are tested with synthetic events), plans and prices are
+  placeholders, and there are no trials, coupons, tax or invoice screens. The **mobile app sends
+  people to the website to subscribe** — selling digital subscriptions in-app normally requires
+  Apple/Google billing, which is a product decision not implemented here
+  ([monetisation.md](docs/architecture/monetisation.md)).
+- **Ads** are an eligibility abstraction with labelled empty slots; no ad network is integrated.
+- **Media**: no antivirus or perceptual-hash scanning of uploads; `photo_url` on players is overwritten
+  by provider sync; media URLs are resolved when an article is saved; the mobile editor has no
+  revision-comparison screen (the API supports it); article view counts lag by the aggregation interval.
+- **Not verified**: there is no browser or device automation (no Playwright/Detox), so the
+  "login → open match → analytics → prediction → comment → react → vote" journey is covered by API
+  integration tests, component tests and a manual Docker run rather than a UI end-to-end test.
 
 - **Phase 4 data availability depends on the provider.** With the bundled
   mock everything is populated (squads are padded with labelled generic
@@ -376,8 +498,8 @@ not to need a rewrite for these:
   in this environment, not a real target platform) shows a React hydration
   console warning on the search screen; iOS/Android are unaffected.
 - Mobile has component/hook tests (Phase 5) but no on-device/E2E automation.
-- Metrics are aggregated across processes via Redis (Phase 5); there is no
-  bundled Prometheus/Grafana, and `/metrics` is unauthenticated like `/health`.
+- Metrics are aggregated across processes via Redis and scraped by the bundled Prometheus/Grafana
+  (Phase 6); `/metrics` is unauthenticated like `/health` — keep it off the public internet.
 - Mobile push notifications require this Expo project to be linked to an
   EAS project (`expo.dev` account, `eas init`) before a real push token
   can be obtained — an external, one-time setup step outside this
@@ -396,3 +518,7 @@ not to need a rewrite for these:
   fixtures drift from wall-clock reality the longer a process runs — a
   deliberate trade-off for having *something* to demo in real time without
   a real provider; see `docs/architecture/realtime.md`.
+
+## Production readiness (Phase 7)
+
+Start at [docs/production-launch-checklist.md](docs/production-launch-checklist.md). Architecture, deployment, operations, security, disaster-recovery and runbook documents live under `docs/`; release notes are in `docs/release-notes/v2.1.0.md`.

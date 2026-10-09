@@ -162,39 +162,43 @@
   }
 }
 
+/* The background orbs are large elements with a 120-140px blur. Animating `scale` forces the browser to re-blur them every
+   frame; translating alone lets the compositor move one pre-rendered layer, which is nearly free. `will-change` promotes them. */
 @keyframes ls-drift {
   0% {
-    transform: translate(0, 0) scale(1);
+    transform: translate3d(0, 0, 0);
   }
   33% {
-    transform: translate(6%, -4%) scale(1.08);
+    transform: translate3d(6%, -4%, 0);
   }
   66% {
-    transform: translate(-5%, 5%) scale(0.96);
+    transform: translate3d(-5%, 5%, 0);
   }
   100% {
-    transform: translate(0, 0) scale(1);
+    transform: translate3d(0, 0, 0);
   }
 }
 
 @keyframes ls-drift-slow {
   0% {
-    transform: translate(0, 0) scale(1.05);
+    transform: translate3d(0, 0, 0);
   }
   50% {
-    transform: translate(-7%, -6%) scale(1);
+    transform: translate3d(-7%, -6%, 0);
   }
   100% {
-    transform: translate(0, 0) scale(1.05);
+    transform: translate3d(0, 0, 0);
   }
 }
 
+/* The pitch lines used to animate `background-position`, which repaints a viewport-sized element on the main thread for
+   the whole life of the page. The pattern repeats every 160px, so translating by exactly one period loops seamlessly on the compositor. */
 @keyframes ls-pitch-pan {
   0% {
-    background-position: 0 0;
+    transform: translate3d(0, 0, 0);
   }
   100% {
-    background-position: 0 -1600px;
+    transform: translate3d(0, -160px, 0);
   }
 }
 
@@ -229,6 +233,12 @@
   }
 }
 
+.ls-orb-1,
+.ls-orb-2,
+.ls-orb-3,
+.ls-pitch-lines {
+  will-change: transform;
+}
 .ls-orb-1 {
   animation: ls-drift 22s ease-in-out infinite;
 }
@@ -239,7 +249,7 @@
   animation: ls-drift 34s ease-in-out infinite reverse;
 }
 .ls-pitch-lines {
-  animation: ls-pitch-pan 40s linear infinite;
+  animation: ls-pitch-pan 4s linear infinite;
 }
 .ls-live-dot {
   animation: ls-blink 1.4s ease-in-out infinite;

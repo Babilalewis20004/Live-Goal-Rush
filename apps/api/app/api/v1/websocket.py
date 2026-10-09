@@ -32,6 +32,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from app.core.config import settings
+from app.core.rate_limit import client_ip
 from app.core.security import decode_access_token
 from app.websocket.manager import manager
 
@@ -39,6 +40,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _MAX_MESSAGE_BYTES = 2048
+
+
+def _refused(websocket: WebSocket) -> bool:
+    """Origin not allowed, process full, or this address already holds its share of the connections."""
+    return (
+        not _origin_allowed(websocket)
+        or manager.at_capacity(settings.websocket_max_connections)
+        or manager.ip_at_capacity(client_ip(websocket), settings.websocket_max_connections_per_ip)  # type: ignore[arg-type]
+    )
 
 
 def _origin_allowed(websocket: WebSocket) -> bool:
@@ -111,7 +121,7 @@ async def _close_quietly(websocket: WebSocket, code: int) -> None:
 
 @router.websocket("/matches")
 async def matches_ws(websocket: WebSocket) -> None:
-    if not _origin_allowed(websocket) or manager.at_capacity(settings.websocket_max_connections):
+    if _refused(websocket):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     try:
@@ -120,7 +130,7 @@ async def matches_ws(websocket: WebSocket) -> None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    await manager.connect_general(websocket)
+    await manager.connect_general(websocket, client_ip(websocket))  # type: ignore[arg-type]
     if user_id is not None:
         logger.info("WS /matches connected: user_id=%s", user_id)
     try:
@@ -146,7 +156,7 @@ async def match_detail_ws(websocket: WebSocket, match_id: str) -> None:
     if not match_id.isdigit():
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    if not _origin_allowed(websocket) or manager.at_capacity(settings.websocket_max_connections):
+    if _refused(websocket):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     try:
@@ -155,7 +165,7 @@ async def match_detail_ws(websocket: WebSocket, match_id: str) -> None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    await manager.connect_match(websocket, match_id)
+    await manager.connect_match(websocket, match_id, client_ip(websocket))  # type: ignore[arg-type]
     if user_id is not None:
         logger.info("WS /matches/%s connected: user_id=%s", match_id, user_id)
     try:

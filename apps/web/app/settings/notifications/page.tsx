@@ -2,8 +2,14 @@ import { redirect } from "next/navigation"
 import Link from "next/link"
 
 import { AnimatedBackground } from "@/components/animated-background"
+import { ContentNotificationSettings } from "@/components/content-notification-settings"
 import { NotificationSettings } from "@/components/notification-settings"
-import { getServerFavourites, getServerNotificationPreferences, getServerUser } from "@/lib/server-auth"
+import {
+  getServerContentPreferences,
+  getServerFavourites,
+  getServerNotificationPreferences,
+  getServerUser,
+} from "@/lib/server-auth"
 
 export const dynamic = "force-dynamic"
 
@@ -11,9 +17,10 @@ export default async function NotificationSettingsPage() {
   const user = await getServerUser()
   if (!user) redirect("/login")
 
-  const [preferences, favourites] = await Promise.all([
+  const [preferences, favourites, contentPreferences] = await Promise.all([
     getServerNotificationPreferences(),
     getServerFavourites(),
+    getServerContentPreferences(),
   ])
 
   return (
@@ -25,6 +32,7 @@ export default async function NotificationSettingsPage() {
         </Link>
         <h1 className="mb-6 mt-4 text-lg font-bold text-white">Notification settings</h1>
         <NotificationSettings initialPreferences={preferences} favourites={favourites} />
+        <ContentNotificationSettings initial={contentPreferences} />
       </div>
     </main>
   )

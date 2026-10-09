@@ -12,12 +12,15 @@ import logging
 
 from app.core.redis_client import RedisService
 from app.core.redis_keys import RedisKeys
+from app.events.community import COMMUNITY_EVENT_TYPES
 from app.websocket.manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
 
 _RECONNECT_DELAY_SECONDS = 2
 
+
+_MATCH_ONLY_TYPES = frozenset(t.value for t in COMMUNITY_EVENT_TYPES)
 
 class PubSubBridge:
     def __init__(self, redis: RedisService, manager: ConnectionManager) -> None:
@@ -55,6 +58,8 @@ class PubSubBridge:
         match_id = str(message.get("match_id", ""))
         payload = {"type": message.get("type"), "match": {"id": match_id, **message.get("data", {})}}
         logger.info("WebSocket broadcast: %s for match %s", payload["type"], match_id)
-        await self.manager.broadcast_general(payload)
+        # Community/analytics nudges are for people on that match's page, not the livescore board.
+        if payload["type"] not in _MATCH_ONLY_TYPES:
+            await self.manager.broadcast_general(payload)
         if match_id:
             await self.manager.broadcast_to_match(match_id, payload)

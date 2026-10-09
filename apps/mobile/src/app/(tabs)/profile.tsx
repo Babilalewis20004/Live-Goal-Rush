@@ -3,6 +3,8 @@ import { useState } from "react"
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native"
 
 import { LoadingState } from "@/components/loading-state"
+import { PrivacyData } from "@/components/privacy-data"
+import { ProfileVisibility } from "@/components/profile-visibility"
 import { useAuth } from "@/hooks/use-auth"
 import { ApiError, api } from "@/lib/api"
 import { theme } from "@/theme"
@@ -71,6 +73,18 @@ function LoggedInProfile() {
         <Text style={styles.linkCardText}>Manage favourite teams, competitions &amp; matches</Text>
       </Pressable>
 
+      {user!.role === "author" || user!.role === "editor" || user!.role === "admin" ? (
+        <Pressable accessibilityRole="button" style={styles.linkCard} onPress={() => router.push("/editor")}>
+          <Text style={styles.linkCardText}>Write &amp; manage articles</Text>
+        </Pressable>
+      ) : null}
+
+      <ProfileVisibility />
+
+      <Pressable accessibilityRole="button" style={styles.linkCard} onPress={() => router.push("/premium")}>
+        <Text style={styles.linkCardText}>Premium &amp; subscription</Text>
+      </Pressable>
+
       <Pressable style={styles.linkCard} onPress={() => router.push("/notification-settings")}>
         <Text style={styles.linkCardText}>Notification settings</Text>
       </Pressable>
@@ -99,6 +113,8 @@ function LoggedInProfile() {
           <Text style={styles.buttonText}>{submitting ? "Saving…" : "Change password"}</Text>
         </Pressable>
       </View>
+
+      {user!.role === "user" ? <PrivacyData /> : null}
 
       <Pressable style={styles.secondaryButton} onPress={() => void logout()}>
         <Text style={styles.secondaryButtonText}>Log out</Text>

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUserDep, DevicesServiceDep, NotificationPreferencesServiceDep
+from app.db.session import get_db
 from app.core.config import settings
 from app.events.schemas import RealtimeEventType
 from app.models.enums import DevicePlatform, NotificationScope
+from app.schemas.discovery import ContentPreferenceIn, ContentPreferenceOut
+from app.services import content_notification_service as content_prefs
 from app.schemas.notification import (
     DeviceOut,
     DeviceRegister,
@@ -78,3 +84,19 @@ async def reset_preference(
         )
     await service.remove(current_user.id, scope_type, scope_id, event_type)
     return Response(status_code=204)
+
+
+@router.get("/content-preferences", response_model=list[ContentPreferenceOut])
+async def get_content_preferences(
+    current_user: CurrentUserDep, db: Annotated[AsyncSession, Depends(get_db)]
+) -> list[ContentPreferenceOut]:
+    """Which kinds of article notification the caller has switched on. All
+    default to off -- nothing is sent until the user opts in."""
+    return await content_prefs.list_preferences(db, current_user.id)
+
+
+@router.put("/content-preferences", response_model=ContentPreferenceOut)
+async def set_content_preference(
+    payload: ContentPreferenceIn, current_user: CurrentUserDep, db: Annotated[AsyncSession, Depends(get_db)]
+) -> ContentPreferenceOut:
+    return await content_prefs.set_preference(db, current_user.id, payload.kind, payload.enabled)

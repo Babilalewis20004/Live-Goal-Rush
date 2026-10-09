@@ -40,6 +40,40 @@ class Metrics:
         "notifications_sent_total",
         "notifications_failed_total",
         "notifications_deduplicated_total",
+        # Phase 6
+        "media_uploads_total",
+        "media_uploads_rejected_total",
+        "articles_published_total",
+        "scheduled_publish_total",
+        "comments_created_total",
+        "comments_reported_total",
+        "reactions_total",
+        "poll_votes_total",
+        "celery_tasks_total",
+        "celery_task_failures_total",
+        # Phase 6b: analytics, predictions, billing
+        "analytics_generation_total",
+        "analytics_generation_failures_total",
+        "prediction_generation_total",
+        "prediction_evaluation_total",
+        "insight_generation_total",
+        "subscription_created_total",
+        "subscription_renewed_total",
+        "subscription_cancelled_total",
+        "subscription_payment_failed_total",
+        "payment_webhooks_total",
+        "payment_webhooks_rejected_total",
+        "premium_feature_usage_total",
+        "premium_feature_denied_total",
+        # Phase 7: operational signals the alert rules (monitoring/prometheus/alerts.yml) watch
+        "payment_webhooks_stale_total",
+        "payment_webhooks_failed_total",
+        "websocket_clients_evicted_total",
+        "db_pool_exhausted_total",
+        "db_unavailable_total",
+        "rate_limited_total",
+        "login_failures_total",
+        "account_deletions_total",
     )
 
     def __init__(self) -> None:
@@ -61,11 +95,12 @@ class Metrics:
             self._prom_websocket_connections = None
             self._prom_live_matches = None
 
-    def enable_aggregation(self, role: str, redis_client) -> None:
-        """Start pushing this process's counters/gauges to Redis under `role`."""
+    def enable_aggregation(self, role: str, redis_client, *, inline: bool = True) -> None:
+        """Start pushing this process's counters/gauges to Redis under `role`. The API passes `inline=False` and flushes
+        from a background thread (`flush`), so a slow or dead Redis can never stall its event loop."""
         from app.services.metrics_aggregation import RedisMetricsSink
 
-        self._sink = RedisMetricsSink(role, redis_client)
+        self._sink = RedisMetricsSink(role, redis_client, inline=inline)
         # publish the gauges' current values straight away
         self._sink.set_gauge("websocket_connections", self._websocket_connections)
         self._sink.set_gauge("live_matches", self._live_matches)
@@ -83,6 +118,10 @@ class Metrics:
         prom_counter = self._prom_counters.get(name)
         if prom_counter is not None:
             prom_counter.inc(amount)
+
+    def count(self, name: str, amount: int = 1) -> None:
+        """Increment any registered counter by name (Phase 6b counters)."""
+        self._increment(name, amount)
 
     def provider_request(self) -> None:
         self._increment("provider_requests_total")
@@ -132,6 +171,35 @@ class Metrics:
 
     def notification_deduplicated(self, amount: int = 1) -> None:
         self._increment("notifications_deduplicated_total", amount)
+
+    def media_uploaded(self) -> None:
+        self._increment("media_uploads_total")
+
+    def media_upload_rejected(self) -> None:
+        self._increment("media_uploads_rejected_total")
+
+    def article_published(self, amount: int = 1) -> None:
+        self._increment("articles_published_total", amount)
+
+    def scheduled_publish(self, amount: int = 1) -> None:
+        self._increment("scheduled_publish_total", amount)
+
+    def comment_created(self) -> None:
+        self._increment("comments_created_total")
+
+    def comment_reported(self) -> None:
+        self._increment("comments_reported_total")
+
+    def reaction_recorded(self) -> None:
+        self._increment("reactions_total")
+
+    def poll_voted(self) -> None:
+        self._increment("poll_votes_total")
+
+    def celery_task(self, failed: bool = False) -> None:
+        self._increment("celery_tasks_total")
+        if failed:
+            self._increment("celery_task_failures_total")
 
     def set_live_matches(self, count: int) -> None:
         self._live_matches = count

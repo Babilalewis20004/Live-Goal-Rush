@@ -1,0 +1,67 @@
+{
+ "get": "players/squads",
+ "parameters": {
+  "team": "50"
+ },
+ "errors": [],
+ "results": 1,
+ "response": [
+  {
+   "team": {
+    "id": 50,
+    "name": "Manchester City",
+    "logo": "https://media.api-sports.io/football/teams/50.png"
+   },
+   "players": [
+    {
+     "id": 19012,
+     "name": "M. Bettinelli",
+     "age": 33,
+     "number": 13,
+     "position": "Goalkeeper",
+     "photo": "https://media.api-sports.io/football/players/19012.png"
+    },
+    {
+     "id": 1622,
+     "name": "G. Donnarumma",
+     "age": 26,
+     "number": 1,
+     "position": "Goalkeeper",
+     "photo": "https://media.api-sports.io/football/players/1622.png"
+    },
+    {
+     "id": 47296,
+     "name": "G. Rulli",
+     "age": 33,
+     "number": 28,
+     "position": "Goalkeeper",
+     "photo": "https://media.api-sports.io/football/players/47296.png"
+    },
+    {
+     "id": 21138,
+     "name": "R. A\u00eft-Nouri",
+     "age": 24,
+     "number": 21,
+     "position": "Defender",
+     "photo": "https://media.api-sports.io/football/players/21138.png"
+    },
+    {
+     "id": 451583,
+     "name": "K. Braithwaite",
+     "age": 17,
+     "number": 61,
+     "position": "Defender",
+     "photo": "https://media.api-sports.io/football/players/451583.png"
+    },
+    {
+     "id": 567,
+     "name": "R\u00faben Dias",
+     "age": 29,
+     "number": 3,
+     "position": "Defender",
+     "photo": "https://media.api-sports.io/football/players/567.png"
+    }
+   ]
+  }
+ ]
+}

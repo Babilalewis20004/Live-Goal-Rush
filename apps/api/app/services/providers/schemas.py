@@ -169,6 +169,16 @@ class ProviderCapabilities(BaseModel):
     """Can supply standings / top scorers for *past* seasons on request."""
 
 
+class ProviderInjury(BaseModel):
+    player: ProviderPlayer
+    team: ProviderTeam | None = None
+    kind: str
+    """"missing" (ruled out) or "doubtful" (questionable)."""
+    reason: str | None = None
+    match_date: datetime | None = None
+    """Kickoff of the fixture the absence applies to."""
+
+
 class ProviderSearchResult(BaseModel):
     teams: list[ProviderTeam] = Field(default_factory=list)
     competitions: list[ProviderCompetition] = Field(default_factory=list)
@@ -187,6 +197,7 @@ __all__ = [
     "ProviderTeamMatchStatistics",
     "ProviderPlayerMatchStatistics",
     "ProviderTopScorer",
+    "ProviderInjury",
     "ProviderCapabilities",
     "ProviderSearchResult",
 ]

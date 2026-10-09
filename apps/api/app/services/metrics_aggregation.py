@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -52,53 +53,88 @@ _HELP = {
     "notifications_sent_total": "Push notifications sent",
     "notifications_failed_total": "Push notifications that failed",
     "notifications_deduplicated_total": "Push notifications suppressed as duplicates",
+    "media_uploads_total": "Images uploaded",
+    "media_uploads_rejected_total": "Image uploads rejected by validation",
+    "articles_published_total": "Articles published (manually or by schedule)",
+    "scheduled_publish_total": "Articles published by the scheduler",
+    "comments_created_total": "Comments posted",
+    "comments_reported_total": "Comment reports filed",
+    "reactions_total": "Reactions recorded",
+    "poll_votes_total": "Poll votes cast",
+    "celery_tasks_total": "Celery tasks finished",
+    "celery_task_failures_total": "Celery tasks that failed",
+    "payment_webhooks_stale_total": "Webhook events ignored because a newer event was already applied",
+    "payment_webhooks_failed_total": "Webhook events that failed to process (the processor will redeliver)",
+    "websocket_clients_evicted_total": "WebSocket clients dropped for not reading",
+    "db_pool_exhausted_total": "Requests refused because every database connection was busy",
+    "db_unavailable_total": "Requests that failed because the database was unreachable",
+    "rate_limited_total": "Requests rejected by a rate limit",
+    "login_failures_total": "Failed sign-in attempts",
+    "account_deletions_total": "Accounts erased at the user's request",
     "websocket_connections": "Currently connected WebSocket clients",
     "live_matches": "Matches currently LIVE or HALFTIME",
 }
 
 
 class RedisMetricsSink:
-    def __init__(self, role: str, client: Any, *, now: Callable[[], float] = time.monotonic) -> None:
+    """Buffers counters in memory and pushes them to Redis.
+
+    `inline=True` (Celery processes, which are synchronous anyway) pushes from whatever thread calls `add`, at most once a
+    second. `inline=False` (the API) never touches Redis from `add`/`set_gauge`: those run on the event loop, and a
+    synchronous Redis call there stalls *every* request for as long as Redis takes to answer -- with Redis stopped that
+    froze the whole API, health checks included. The API flushes from a worker thread on a timer instead.
+    """
+
+    def __init__(self, role: str, client: Any, *, now: Callable[[], float] = time.monotonic, inline: bool = True) -> None:
         self.role = role
         self._client = client
         self._now = now
+        self._inline = inline
         self._pid = os.getpid()
+        self._lock = threading.Lock()
         self._pending: dict[str, int] = defaultdict(int)
         self._gauges: dict[str, int] = {}
         self._gauges_dirty = False
         self._last_flush = 0.0
 
     def add(self, name: str, amount: int = 1) -> None:
-        if name in self._pending or len(self._pending) < _MAX_PENDING_NAMES:
-            self._pending[name] += amount
+        with self._lock:
+            if name in self._pending or len(self._pending) < _MAX_PENDING_NAMES:
+                self._pending[name] += amount
         self._maybe_flush()
 
     def set_gauge(self, name: str, value: int) -> None:
-        self._gauges[name] = value
-        self._gauges_dirty = True
+        with self._lock:
+            self._gauges[name] = value
+            self._gauges_dirty = True
         self._maybe_flush()
 
     def _maybe_flush(self) -> None:
-        if self._now() - self._last_flush >= FLUSH_INTERVAL_SECONDS:
+        if self._inline and self._now() - self._last_flush >= FLUSH_INTERVAL_SECONDS:
             self.flush()
 
     def flush(self) -> None:
-        """Push buffered increments and current gauges. Never raises."""
+        """Push buffered increments and current gauges. Never raises. Safe to call from a thread."""
         self._last_flush = self._now()
+        with self._lock:
+            batch = {name: amount for name, amount in self._pending.items() if amount}
+            gauges = dict(self._gauges)
+            self._pending.clear()
         try:
             pipe = self._client.pipeline()
-            for name, amount in self._pending.items():
-                if amount:
-                    pipe.hincrby(f"{COUNTERS_PREFIX}{self.role}", name, amount)
-            if self._gauges:
+            for name, amount in batch.items():
+                pipe.hincrby(f"{COUNTERS_PREFIX}{self.role}", name, amount)
+            if gauges:
                 key = f"{GAUGES_PREFIX}{self.role}:{self._pid}"
-                pipe.hset(key, mapping={k: int(v) for k, v in self._gauges.items()})
+                pipe.hset(key, mapping={k: int(v) for k, v in gauges.items()})
                 pipe.expire(key, GAUGE_TTL_SECONDS)
             pipe.execute()
         except Exception:
             logger.debug("Metrics flush to Redis failed; keeping buffered values", exc_info=True)
+            with self._lock:  # put the increments back so nothing is lost (bounded by _MAX_PENDING_NAMES names)
+                for name, amount in batch.items():
+                    self._pending[name] += amount
             return
-        self._pending.clear()
         self._gauges_dirty = False
 
 

@@ -29,9 +29,9 @@ from app.core.redis_keys import RedisKeys
 from app.db.session import get_db
 from app.main import create_app
 from app.services.providers import get_provider
-from app.services.providers import mock_extras
-from app.services.providers.mock_data import FIXTURES
-from app.services.providers.mock_provider import MockFootballDataProvider, _player_from_dict, _team
+from tests.fakes import mock_extras
+from tests.fakes.mock_data import FIXTURES
+from tests.fakes.mock_provider import MockFootballDataProvider, _player_from_dict, _team
 from app.services.providers.schemas import (
     ProviderMatch,
     ProviderMatchEvent,
@@ -321,3 +321,33 @@ async def test_live_standings_do_not_change_until_the_match_finishes(pipeline):
     await _poll(provider)
     assert pipeline["queued_standings"] == []
     del client
+
+
+async def test_the_change_detection_snapshot_expires_so_redis_does_not_accumulate_a_key_per_match(pipeline):
+    """Phase 7 Redis audit: this key had no TTL, so one stayed behind for every match ever synced (and `volatile-lru`
+    never evicts a key without a TTL)."""
+    client, provider, redis = pipeline["client"], pipeline["provider"], pipeline["redis"]
+    await _poll(provider)
+    match_id = (await client.get("/api/v1/matches/live")).json()[0]["id"]
+    ttl = await redis._client.ttl(RedisKeys.match_state(match_id))
+    assert 0 < ttl <= settings.match_state_ttl_seconds
+    await _poll(provider)  # every sync refreshes it
+    assert await redis._client.ttl(RedisKeys.match_state(match_id)) > settings.match_state_ttl_seconds - 60
+
+
+async def test_no_cache_or_counter_key_family_is_written_without_an_expiry(pipeline):
+    """Everything the API and worker write to Redis must expire, except the Celery queue and the metric counters (small, fixed
+    set) -- otherwise memory grows with traffic. A scan of every key after a full scenario enforces it."""
+    client, provider, redis = pipeline["client"], pipeline["provider"], pipeline["redis"]
+    await _poll(provider)
+    live = (await client.get("/api/v1/matches/live")).json()
+    match_id = live[0]["id"]
+    for path in (f"/matches/{match_id}", f"/matches/{match_id}/events", f"/matches/{match_id}/lineups", "/matches/today", "/competitions", "/search?q=liverpool", "/articles"):
+        await client.get(f"/api/v1{path}")
+    allowed_without_ttl = ("football:articles:ver", "football:metrics:counters:")
+    leaked = [
+        key
+        async for key in redis._client.scan_iter("*")
+        if await redis._client.ttl(key) == -1 and not key.startswith(allowed_without_ttl)
+    ]
+    assert leaked == [], f"keys without an expiry: {leaked}"

@@ -2,7 +2,12 @@
 
 import { useState } from "react"
 import Link from "next/link"
+import { AnalysisTab } from "@/components/analytics/analysis-tab"
+import { Discuss } from "@/components/community/discuss"
 import { FavouriteButton } from "@/components/favourite-button"
+import { InsightsList } from "@/components/insights/insights-list"
+import { EntityNews } from "@/components/news/entity-news"
+import { ShareButton } from "@/components/news/share-button"
 import { ConnectionBadge } from "@/components/ui/connection-badge"
 import { FeatureState } from "@/components/ui/feature-state"
 import { TabPanel, Tabs, type TabDef } from "@/components/ui/tabs"
@@ -16,19 +21,23 @@ import { Statistics, hasStatistics } from "@/components/match-centre/statistics"
 import { Timeline } from "@/components/match-centre/timeline"
 import { useMatchDetail } from "@/hooks/use-match-detail"
 import type {
+  ArticleSummary,
   Capabilities,
   HeadToHeadOut,
+  MatchInsightsOut,
   MatchDetail as MatchDetailType,
   MatchFormOut,
   MatchLineupsOut,
   MatchStatisticsOut,
+  Page,
   StandingEntry,
 } from "@/types/api"
 
-type TabId = "overview" | "timeline" | "stats" | "lineups" | "table"
+type TabId = "overview" | "analysis" | "timeline" | "stats" | "lineups" | "table" | "news" | "discuss"
 
 const TABS: TabDef<TabId>[] = [
   { id: "overview", label: "Overview" },
+  { id: "analysis", label: "Analysis" },
   { id: "timeline", label: "Timeline" },
   { id: "stats", label: "Stats" },
   { id: "lineups", label: "Lineups" },
@@ -47,6 +56,12 @@ export interface MatchCentreData {
   headToHead: HeadToHeadOut | null
   standings: StandingEntry[] | null
   capabilities: Capabilities | null
+  /** News about this match, then its teams, then its competition (the API labels which). */
+  news: Page<ArticleSummary> | null
+  /** Form summaries, streaks and head-to-head sentences (null if unavailable). */
+  insights: MatchInsightsOut | null
+  /** Canonical absolute URL, for sharing. */
+  shareUrl: string
 }
 
 /** Client half of the match centre. The server component
@@ -62,7 +77,7 @@ export function MatchDetailLive({
   initialFollowed?: boolean
   data: MatchCentreData
 }) {
-  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings } = useMatchDetail(
+  const { match, connectionStatus, lastUpdatedAt, lineups, statistics, standings, nudges } = useMatchDetail(
     initialMatch,
     { lineups: data.lineups, statistics: data.statistics, standings: data.standings },
     data.capabilities,
@@ -70,7 +85,8 @@ export function MatchDetailLive({
   const [tab, setTab] = useState<TabId>("overview")
   const isLive = match.status === "live" || match.status === "halftime"
   const notStarted = match.status === "scheduled" || match.status === "postponed" || match.status === "cancelled"
-  const { capabilities } = data
+  const { capabilities, news } = data
+  const tabs: TabDef<TabId>[] = [...TABS, ...(news && news.total > 0 ? [{ id: "news" as const, label: "News" }] : []), { id: "discuss", label: "Discuss" }]
 
   return (
     <div className="mx-auto max-w-3xl px-4 pb-16 pt-6">
@@ -80,6 +96,7 @@ export function MatchDetailLive({
         </Link>
         <div className="flex items-center gap-2">
           <ConnectionBadge status={connectionStatus} />
+          <ShareButton url={data.shareUrl} title={`${match.home_team.name} vs ${match.away_team.name}`} />
           <FavouriteButton kind="match" id={match.id} initialFollowed={initialFollowed} />
         </div>
       </div>
@@ -91,7 +108,7 @@ export function MatchDetailLive({
       </div>
 
       <div className="mt-4">
-        <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Match centre sections" />
+        <Tabs tabs={tabs} active={tab} onChange={setTab} idPrefix={ID_PREFIX} label="Match centre sections" />
       </div>
 
       <TabPanel idPrefix={ID_PREFIX} id="overview" active={tab === "overview"}>
@@ -119,8 +136,22 @@ export function MatchDetailLive({
             )}
           </section>
 
+          {data.insights && (data.insights.home.insights.length > 0 || data.insights.away.insights.length > 0 || data.insights.head_to_head.length > 0) && (
+            <section className="space-y-4 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-md">
+              <h2 className="text-sm font-semibold text-white">Form &amp; streaks</h2>
+              <InsightsList title={match.home_team.name} insights={data.insights.home.insights} />
+              <InsightsList title={match.away_team.name} insights={data.insights.away.insights} />
+              <InsightsList title="Head to head" insights={data.insights.head_to_head} />
+              <p className="text-[10px] text-white/30">{data.insights.note}</p>
+            </section>
+          )}
+
           {match.events.length > 0 && <Timeline match={match} />}
         </div>
+      </TabPanel>
+
+      <TabPanel idPrefix={ID_PREFIX} id="analysis" active={tab === "analysis"}>
+        <AnalysisTab match={match} nudges={nudges} />
       </TabPanel>
 
       <TabPanel idPrefix={ID_PREFIX} id="timeline" active={tab === "timeline"}>
@@ -181,6 +212,15 @@ export function MatchDetailLive({
             pendingMessage="No table is available for this competition yet."
           />
         )}
+      </TabPanel>
+
+      {news && news.total > 0 && (
+        <TabPanel idPrefix={ID_PREFIX} id="news" active={tab === "news"}>
+          <EntityNews kind="match" id={match.id} initial={news} />
+        </TabPanel>
+      )}
+      <TabPanel idPrefix={ID_PREFIX} id="discuss" active={tab === "discuss"}>
+        <Discuss targetType="match" targetId={match.id} />
       </TabPanel>
     </div>
   )
