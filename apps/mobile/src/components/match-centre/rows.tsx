@@ -293,7 +293,7 @@ export function StandingRowView({
       <Pressable
         accessibilityRole="link"
         accessibilityLabel={`${row.position}. ${row.team.name}, played ${row.played}, won ${row.won}, drawn ${row.drawn}, lost ${row.lost}, goal difference ${gd}, ${row.points} points${row.description ? `, ${row.description}` : ""}`}
-        style={[styles.tableRow, highlighted && styles.tableRowHighlight]}
+        style={StyleSheet.flatten([styles.tableRow, highlighted && styles.tableRowHighlight])}
       >
         <View style={[styles.zone, { backgroundColor: ZONE_COLOR[zoneTone(row.description)] }]} />
         <Text style={[styles.td, { width: 24 }]}>{row.position}</Text>

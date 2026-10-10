@@ -1,5 +1,5 @@
 import { Link } from "expo-router"
-import { StyleSheet, Text, View } from "react-native"
+import { Pressable, StyleSheet, Text, View } from "react-native"
 import type { MatchSummary } from "@/types/api"
 import { formatKickoff } from "@/lib/format"
 import { theme } from "@/theme"
@@ -42,7 +42,11 @@ export function MatchCard({ match }: { match: MatchSummary }) {
 
   return (
     <Link href={{ pathname: "/match/[id]", params: { id: String(match.id) } }} asChild>
-      <View style={styles.row}>
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel={`${match.home_team.name} versus ${match.away_team.name}`}
+        style={styles.row}
+      >
         {isLive && <View style={styles.liveBar} />}
         <View style={styles.statusCol}>
           <StatusLabel match={match} />
@@ -73,7 +77,7 @@ export function MatchCard({ match }: { match: MatchSummary }) {
             {!scheduled && <Score value={match.away_score} live={isLive} dim={homeWin} />}
           </View>
         </View>
-      </View>
+      </Pressable>
     </Link>
   )
 }
